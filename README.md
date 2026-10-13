@@ -4,7 +4,13 @@ A Claude Code mod: live progress bars above the prompt for long jobs (training r
 Claude desktop app's Code tab and in the terminal, every chat's jobs in tabs, and the session's figures (context, rate
 limits, tokens, cost) in one line.
 
+Small, as you like it: minimized, this chat's jobs under the session's figures —
+
 ![the band minimized: the session's figures over three jobs of this chat](docs/demo/light.png)
+
+— or with tabs, every open chat's jobs a click away:
+
+![the band with tabs: three jobs of this chat](docs/demo/light-tabs.png)
 
 <sub>Every screenshot here is the mod's demo mode: made-up jobs, chats and figures.</sub>
 
