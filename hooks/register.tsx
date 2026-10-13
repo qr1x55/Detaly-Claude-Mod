@@ -35,11 +35,14 @@ const OUTPUT_MAX = 1 << 20 // a task's output is parsed for progress while under
 // A tab of the band: this session's jobs, another session's (from what its own mod publishes), or file jobs of a
 // project with no session.
 type Group = { id: string; label: string; rows: Row[]; isSelf?: boolean }
-// What a session's mod publishes for the others: ~/.claude/progress/sessions/<id>.json, rewritten when its rows change
-// and every PUBLISH_S, so a file gone quiet past ALIVE_S is a closed session.
+// What a session's mod publishes for the others, in the store every session on the machine shares ($.store, key
+// chat:<id>): rewritten when its rows change and every PUBLISH_S, so an entry gone quiet past ALIVE_S is a closed chat,
+// and past FORGET_S it is deleted (by whichever chat sees it), as a chat's own is when it ends. sync:<id> holds the
+// last ⟳ Sync another chat asked of it. Files could not be deleted ($.fs has no delete), so they piled up.
 type Published = { session: string; label: string; updated: number; rows: Row[] }
 const PUBLISH_S = 10
 const ALIVE_S = 60
+const FORGET_S = 3600
 
 let groups: Group[] = []
 let selfId = '' // this session
@@ -294,7 +297,7 @@ async function syncTab($: EngineInterface, id: string) {
   for (const g of groups) {
     if (g.isSelf || (id !== 'all' && g.id !== id)) continue
     for (const k of [...gone]) if (k.startsWith(`${g.id}:`)) gone.delete(k)
-    if (!g.id.startsWith('project:')) await $.fs.write(`${progressDir}/sessions/${g.id}.sync`, String(Date.now())).catch(() => {})
+    if (!g.id.startsWith('project:')) await $.store.set(`sync:${g.id}`, Date.now()).catch(() => {})
   }
   if (id === 'all') await update($, closedAtom, () => [])
   await runNow?.()
@@ -360,15 +363,14 @@ async function tick($: EngineInterface, dir: string, root: string) {
   const text = JSON.stringify(own)
   if (text !== published || now - publishedAt > PUBLISH_S) {
     const pub: Published = { session: selfId, label, updated: now, rows: own }
-    await $.fs.write(`${dir}/sessions/${selfId}.json`, JSON.stringify(pub)).catch(() => {})
+    await $.store.set(`chat:${selfId}`, pub).catch(() => {})
     published = text
     publishedAt = now
   }
-  const sessions = (await $.fs.list(`${dir}/sessions`).catch(() => [])).sort((a, b) => a.name.localeCompare(b.name))
   const demoFile = (await $.fs.list(dir).catch(() => [])).find(f => f.name === 'demo.json')
   demo = demoFile ? await fresh<Demo>($, lastDemo, 'demo', `${dir}/demo.json`, demoFile.mtimeMs) : undefined
-  // another chat's ⟳ Sync on this chat's tab: a request newer than the one last seen (the first listing only notes it)
-  const asked = sessions.find(f => f.name === `${selfId}.sync`)?.mtimeMs ?? 0
+  // another chat's ⟳ Sync on this chat's tab: a request newer than the one last seen (the first read only notes it)
+  const asked = Number((await $.store.get(`sync:${selfId}`).catch(() => 0)) ?? 0)
   if (syncSeen !== undefined && asked !== syncSeen) await syncSelf($)
   syncSeen = asked
   // the groups: this session (its shells and its file jobs), each live session that publishes, the rest by project
@@ -379,11 +381,27 @@ async function tick($: EngineInterface, dir: string, root: string) {
     rows: demo ? [] : [...own],
   }
   const byId = new Map<string, Group>([[selfId, self]])
-  for (const f of sessions) {
-    const sid = f.name.slice(0, -5)
-    if (!f.name.endsWith('.json') || sid === selfId || now - f.mtimeMs / 1000 > ALIVE_S || (demo && !sid.startsWith('demo-'))) continue
-    const p = await fresh<Published>($, lastPub, sid, `${dir}/sessions/${f.name}`, f.mtimeMs)
-    if (!p) continue
+  // the other chats: the store's entries (a demo's made-up chats come from files, sessions/demo-*.json)
+  const chats: [string, Published][] = []
+  if (!demo) {
+    for (const k of (await $.store.keys().catch(() => [] as string[])).filter(k => k.startsWith('chat:')).sort()) {
+      const sid = k.slice(5)
+      const p = sid === selfId ? undefined : ((await $.store.get(k).catch(() => undefined)) as Published | undefined)
+      if (!p) continue
+      if (now - p.updated > FORGET_S) {
+        await $.store.delete(k).catch(() => {})
+        await $.store.delete(`sync:${sid}`).catch(() => {})
+      } else if (now - p.updated <= ALIVE_S) chats.push([sid, p])
+    }
+  } else {
+    for (const f of (await $.fs.list(`${dir}/sessions`).catch(() => [])).sort((a, b) => a.name.localeCompare(b.name))) {
+      const sid = f.name.slice(0, -5)
+      if (!f.name.endsWith('.json') || !sid.startsWith('demo-') || now - f.mtimeMs / 1000 > ALIVE_S) continue
+      const p = await fresh<Published>($, lastPub, sid, `${dir}/sessions/${f.name}`, f.mtimeMs)
+      if (p) chats.push([sid, p])
+    }
+  }
+  for (const [sid, p] of chats) {
     if (demo && sid === 'demo-self') {
       self.rows.push(...p.rows.map(r => (r.spent || isOver(r) ? r : { ...r, spent: spentText(demoSpent(r.id)) })))
       continue
@@ -586,6 +604,12 @@ const svgRing = (f: number | undefined, hex: string) => {
 }
 
 export const register: Register = on => {
+  // a chat that ends takes its entry out of the store (the others would forget it after FORGET_S anyway)
+  on('session.end', async ($, e, next) => {
+    await $.store.delete(`chat:${selfId}`).catch(() => {})
+    return next(e)
+  })
+
   on('session.start', async ($, e, next) => {
     const home = (await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME'))
     const dir = `${home}/.claude/progress`

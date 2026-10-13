@@ -133,10 +133,13 @@ On the tab row, **ⓘ Info** (left of Minimize) shows the same figures and detai
 
 - **Nothing leaves your machine.** The mod makes no network calls and costs no tokens: it draws, and reads and writes
   local files.
-- `~/.claude/progress/sessions/<session>.json`: each open chat's rows, under the chat's name: its folder and **the
-  start of its first message** (40 characters). Every other chat on this machine reads these files for its All tab.
-  Delete the folder whenever; a chat writes its file again within 10 s.
-- `~/.claude/progress/<id>.json`: progress files that jobs outside Claude write (below). Never deleted by the mod.
+- **Claude Code's shared mod store** (`$.store`, one per machine): each open chat's rows under the chat's name, its
+  folder and **the start of its first message** (40 characters); every other chat reads them for its All tab. A
+  chat's entry leaves when the chat ends, or after an hour of silence (whichever chat sees it first removes it), so
+  nothing piles up.
+- `~/.claude/progress/<id>.json`: progress files that jobs outside Claude write (below). The helpers remove the ones
+  nobody has written for a week when they start; the mod itself cannot delete files. A `sessions/` folder there is
+  left from versions before 0.1.0: delete it.
 - The session's state (Claude Code's own store for mods): the chat's background tasks, the open tab, minimized or
   not, and the token counts.
 
@@ -197,8 +200,8 @@ Helpers in `bin/` (the folder is on `PATH` for commands Claude runs):
 Start such helpers detached (`Start-Process`), not as a Claude background task: a background task wakes its chat
 (a paid turn) when it exits.
 
-How chats see each other: each session's mod writes its rows to `~/.claude/progress/sessions/<session>.json` when
-they change and every 10 s; a file quiet for a minute is a closed chat.
+How chats see each other: each chat's mod puts its rows in the shared mod store when they change and every 10 s; an
+entry quiet for a minute is a closed chat, and after an hour it is removed.
 
 ## Limits
 
@@ -213,8 +216,8 @@ they change and every 10 s; a file quiet for a minute is a closed chat.
   was loaded at all show up at the chat's next turn end, with a count from then (`≥ 0:02`); a clock time in their
   description (`at ~18:10`) still gives the exact countdown.
 - Tokens are counted from the model's responses while the mod runs; nothing before it was loaded.
-- Every open session reads `~/.claude/progress` every 2 s (files untouched for an hour are skipped). Old files are
-  never deleted; remove them whenever.
+- Every open chat reads `~/.claude/progress` every 2 s (files untouched for an hour are skipped), and a file again
+  only when it changed.
 - The bars fill the band's width; on the desktop they are sized from cells measured at ~7.85 px (Windows 11, 100 %
   zoom), so at another zoom a bar may end a little short of or past its column. Whether a name is cut is a guess at
   its width there.

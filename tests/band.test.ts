@@ -22,7 +22,8 @@ const BAND = {
 } as const
 
 // A session 's1' in a worktree of D:\dev\game, over a progress folder of `files` (name -> job or raw text) and a
-// registry of other sessions (`sessions`: id -> what that session's mod published); `written` keeps what s1 publishes.
+// registry of other sessions in the shared store (`sessions`: id -> what that session's mod published, as chat:<id>);
+// `stored` keeps what s1 sets there.
 function world(
   on: On,
   files: () => Record<string, unknown>,
@@ -33,6 +34,22 @@ function world(
   mock.env(on, { USERPROFILE: 'C:\\Users\\u' })
   const env: Record<string, string | undefined> = {}
   const written: Record<string, string> = {}
+  const stored: Record<string, unknown> = {}
+  // the shared store: the other chats' entries (fresh), then what s1 wrote
+  const chat = (k: string) => {
+    const p = k.startsWith('chat:') ? (sessions()[k.slice(5)] as object | undefined) : undefined
+    return p ? { ...p, updated: clock.now() / 1000 } : undefined
+  }
+  on('store.keys', () => ({ value: [...new Set([...Object.keys(sessions()).map(id => `chat:${id}`), ...Object.keys(stored)])] }))
+  on('store.get', ($, e) => ({ value: stored[e.key] ?? chat(e.key) }))
+  on('store.set', ($, e) => {
+    stored[e.key] = e.value
+    return { value: undefined }
+  })
+  on('store.delete', ($, e) => {
+    delete stored[e.key]
+    return { value: undefined }
+  })
   on('env.set', ($, e) => {
     env[e.name] = e.value
     return { value: undefined }
@@ -50,19 +67,12 @@ function world(
   on('ui.render', () => ({ type: 'Box' as const })) // the engine's own (empty) band
   const entry = (name: string) => ({ name, kind: 'file' as const, size: 1, mtimeMs: clock.now(), isLink: false })
   on('fs.list', ($, e) => {
-    if (e.path.endsWith('sessions')) return { value: Object.keys(sessions()).map(id => entry(`${id}.json`)) }
     expect(e.path).toBe('C:\\Users\\u\\.claude\\progress')
     return { value: Object.keys(files()).map(entry) }
   })
   on('fs.read', ($, e) => {
     if (e.path.endsWith('.output')) return { value: output(e.path) }
     const name = e.path.split(/[\\/]/).pop()!
-    if (name.endsWith('.sync')) {
-      const asked = Object.entries(written).find(([path]) => path.endsWith(name))?.[1]
-      if (asked === undefined) return { value: '' } // none yet
-      return { value: asked }
-    }
-    if (/[\\/]sessions[\\/]/.test(e.path)) return { value: JSON.stringify(sessions()[name.slice(0, -5)]) }
     const f = files()[name]
     return { value: typeof f === 'string' ? f : JSON.stringify(f) }
   })
@@ -70,7 +80,7 @@ function world(
     written[e.path] = e.text
     return { value: undefined }
   })
-  return { clock, env, written }
+  return { clock, env, written, stored }
 }
 
 test('own session and own project only; bar, percent, counts, ETA; stalled; old finished dropped', async ($, on) => {
@@ -351,7 +361,7 @@ test("tabs: this chat, All, and another chat that publishes its jobs; a tab's Cl
     updated: T0,
     rows: [{ id: 'bg-r1', title: 'Render trailer', f: 0.5, counts: '50 / 100', tail: '~1 min left · 11:01', state: 'run' }],
   }
-  const { clock, written } = world(
+  const { clock, stored } = world(
     on,
     () => ({ 'mine.json': { title: 'Resize images', done: 5, total: 10, updated: T0, started: T0 - 10, session: 's1' } }),
     () => '',
@@ -363,7 +373,7 @@ test("tabs: this chat, All, and another chat that publishes its jobs; a tab's Cl
   await clock.settle()
 
   // what this chat publishes for the others: its label (folder and first message) and its background shells
-  const mine = JSON.parse(Object.entries(written).find(([path]) => /sessions[\\/]s1\.json$/.test(path))?.[1] ?? '{}')
+  const mine = (stored['chat:s1'] ?? {}) as { label?: string }
   expect(mine.label).toBe('game · train the walking net')
 
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
@@ -410,7 +420,7 @@ test("another chat's Sync asks it to sync itself; Clear takes a tab's finished r
       { id: 'bg-r2', title: 'Encode', f: 1, counts: '', tail: 'done', state: 'done' },
     ],
   }
-  const { clock, written } = world(
+  const { clock, stored } = world(
     on,
     () => ({
       'a.json': { title: 'Resize images', done: 5, total: 10, updated: T0, started: T0 - 10, session: 's1' },
@@ -434,7 +444,7 @@ test("another chat's Sync asks it to sync itself; Clear takes a tab's finished r
   // s2's Sync: its hidden row back here, and a request s2's mod picks up
   await ui.press({ key: 'sync:s2' })
   expect(await ui.find({ key: 's2:bg-r2' })).toBeDefined()
-  const asked = Object.keys(written).find(path => /sessions[\\/]s2\.sync$/.test(path))
+  const asked = stored['sync:s2']
   expect(asked).toBeDefined()
 })
 
@@ -545,4 +555,18 @@ test("a shell's row carries what Claude spent on it, in a card while hovered", a
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
   expect(texts).toContain('Claude on it: $0.12 · 50k in · 900 out · 1 response')
+})
+
+test("a chat silent for an hour leaves the shared store; one that ends takes its own entry out", async ($, on) => {
+  const { clock, stored } = world(on, () => ({}))
+  on('session.end', () => ({ sessionId: 's1' }) as never) // the engine's own end
+  stored['chat:old'] = { session: 'old', label: 'gone · long ago', updated: T0 - 7200, rows: [] }
+  stored['sync:old'] = T0 * 1000 - 7_200_000
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  expect(stored['chat:old']).toBeUndefined()
+  expect(stored['sync:old']).toBeUndefined()
+  expect(stored['chat:s1']).toBeDefined() // this chat's own, published
+  await $.session.end({ reason: 'other' } as never)
+  expect(stored['chat:s1']).toBeUndefined()
 })

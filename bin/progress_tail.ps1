@@ -16,6 +16,8 @@ param(
 )
 $dir = Join-Path $env:USERPROFILE '.claude\progress'
 $null = New-Item -ItemType Directory -Force $dir
+# progress files nobody has written for a week go (the mod cannot delete files)
+Get-ChildItem $dir -Filter *.json -File | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-7) } | Remove-Item -ErrorAction SilentlyContinue
 $dst = Join-Path $dir "$Id.json"
 $tmp = "$dst.tmp"
 $started = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
