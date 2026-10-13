@@ -4,13 +4,13 @@ A Claude Code mod: live progress bars above the prompt for long jobs (training r
 Claude desktop app's Code tab and in the terminal, every chat's jobs in tabs, and the session's figures (context, rate
 limits, tokens, cost) in one line.
 
-Small, as you like it: minimized, this chat's jobs under the session's figures —
+As small or as busy as you like: minimized, this chat's jobs under the session's figures —
 
 ![the band minimized: the session's figures over three jobs of this chat](docs/demo/light.png)
 
-— or with tabs, every open chat's jobs a click away:
+— or all of it at once: every open chat's jobs in tabs, thin rows and pages when there are many.
 
-![the band with tabs: three jobs of this chat](docs/demo/light-tabs.png)
+![All: every open chat's jobs, a heading each, pages at the right](docs/demo/all.png)
 
 <sub>Every screenshot here is the mod's demo mode: made-up jobs, chats and figures.</sub>
 
@@ -67,8 +67,6 @@ The timer and spinner rows animate; the bars do not jitter: a timer's text chang
 **All** (every chat's jobs, a heading per chat), **this chat**, and **each other open chat with jobs**, named by its
 folder and the start of its first message. The open tab is lit; the count is its running jobs. A chat's tab with
 nothing in it keeps the band away until a job starts (or `/detaly`, which opens All).
-
-![All: every open chat's jobs, a heading each, pages at the right](docs/demo/all.png)
 
 **Hover a tab** and its tools show in a card under it:
 
