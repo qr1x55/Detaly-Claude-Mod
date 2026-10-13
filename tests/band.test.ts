@@ -83,7 +83,7 @@ function world(
   return { clock, env, written, stored }
 }
 
-test('own session and own project only; bar, percent, counts, ETA; stalled; old finished dropped', async ($, on) => {
+test('own session and own project only; bar, percent, counts, ETA; stalled; stopped; old finished dropped', async ($, on) => {
   const job = (more: object) => ({ done: 50, total: 200, unit: 'it', started: T0 - 100, updated: T0, ...more })
   const files = {
     'train5.json': job({ title: 'train5', done: 1850, total: 3000, eta_s: 1020, session: 's1', project: 'D:\\x' }),
@@ -92,6 +92,8 @@ test('own session and own project only; bar, percent, counts, ETA; stalled; old 
     'elsewhere.json': job({ title: 'elsewhere', project: 'D:\\dev\\gameOther' }),
     'dl.json': job({ title: 'dl', unit: 'MB', updated: T0 - 90 }),
     'old.json': job({ title: 'old', finished: true, updated: T0 - 400 }),
+    'cut.json': job({ title: 'cut', stopped: true, updated: T0 - 40 }), // the log's writer gone (progress_tail)
+    'cutold.json': job({ title: 'cutold', stopped: true, updated: T0 - 400 }),
     'bad.json': '{"title": "half', // caught mid-write, never seen whole: no row
   }
   const { clock, env } = world(on, () => files)
@@ -105,14 +107,15 @@ test('own session and own project only; bar, percent, counts, ETA; stalled; old 
     // the numbers: text on the terminal, inside the bar's picture (its alt) on the desktop
     const numbers = async () => [(await ui.find({ key: 'train5' }))?.text, ...(await ui.findAll({ type: 'Svg' })).map(svg => svg.props.alt)].join(' | ')
     const rows = (await ui.findAll({ type: 'Box' })).filter(b => b.key !== undefined && !/-name$|^tab|^group-|^info$|^stat-/.test(b.key)).map(b => b.key)
-    expect(rows).toEqual(['dl', 'manual', 'train5'])
+    expect(rows).toEqual(['dl', 'manual', 'train5', 'cut'])
+    expect((await ui.find({ key: 'cut' }))?.text).toContain('stopped')
     expect((await ui.find({ key: 'train5' }))?.text).toContain('train5')
     expect(await numbers()).toContain('61 %')
     expect(await numbers()).toContain('1850 / 3000 it')
     expect((await ui.find({ key: 'train5' }))?.text).toContain(`17 min left · ${hm(T0 + 1020)}`)
     expect((await ui.find({ key: 'dl' }))?.text).toContain('stalled 2 min')
     expect((await ui.find({ key: 'manual' }))?.text).toContain('2 min left')
-    expect(await ui.findAll({ type: 'Svg' })).toHaveLength(surface === 'desktop' ? 3 : 0) // a bar each, its numbers inside
+    expect(await ui.findAll({ type: 'Svg' })).toHaveLength(surface === 'desktop' ? 4 : 0) // a bar each, its numbers inside
     await ui.unmount()
   }
 })
@@ -160,6 +163,11 @@ test('background shells: timer against the described estimate, progress from out
   } as never)
   await clock.advance(2000)
   expect(await eval5()).toContain('done')
+
+  // a stopped shell sends no notification: the stop is its end
+  await $.tool.call({ tool: 'TaskStop', task_id: 'ddd444' } as never)
+  await clock.advance(2000)
+  expect((await ui.find({ key: 'bg-ddd444' }))?.text).toContain('stopped after 5:0')
 
   // a reload forgot them; the turn's end lists what still runs
   const later = hm(T0 + 1800)

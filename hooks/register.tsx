@@ -4,7 +4,7 @@ import type { EngineInterface, Register, SessionUsage } from 'claude-code'
 import type { JobProgressTask, Spent } from '../types'
 
 // One file per job in ~/.claude/progress/<id>.json, written by the job (bin/progress.py, bin/progress_tail.ps1):
-// { title, done, total, unit, started, eta_s, updated, finished, session, project }, times in unix seconds.
+// { title, done, total, unit, started, eta_s, updated, finished, stopped, session, project }, times in unix seconds.
 // `session`: the Claude session that launched the job (CLAUDE_JOB_SESSION, set below for everything this session
 // starts); `project`: where the job runs, for jobs started outside Claude.
 type Job = {
@@ -16,11 +16,12 @@ type Job = {
   eta_s?: number | null
   updated?: number
   finished?: boolean
+  stopped?: boolean // ended before its total (progress_tail: the log's writer is gone)
   session?: string | null
   project?: string | null
 }
 type Bg = JobProgressTask // a background shell of this session (types/index.d.ts)
-type State = 'run' | 'stale' | 'done' | 'fail'
+type State = 'run' | 'stale' | 'done' | 'fail' | 'stop' // stop: stopped on purpose, kept and dropped like done
 // isTimer: time, not counted work: a ring in place of the dot and a wait bar (filled to f, or sweeping without f)
 // `spent`: what Claude's responses about the job cost, shown while the row is hovered
 type Row = { id: string; title: string; f: number | undefined; counts: string; tail: string; state: State; isTimer?: boolean; spent?: string }
@@ -61,7 +62,7 @@ const lastLine = new Map<string, { size: number; at: number; line: string }>()
 const BIG_OUTPUT = 64 << 10 // a growing output past this is read again every BIG_EVERY_S at most
 const BIG_EVERY_S = 10
 const firstSeen = new Map<string, { t: number; done: number }>() // the rate is measured from here
-const isOver = (r: Row) => r.state === 'done' || r.state === 'fail'
+const isOver = (r: Row) => r.state === 'done' || r.state === 'fail' || r.state === 'stop'
 // Rows the person dismissed: "bg-<id>" for a background task, "<id>@<started>" for a file job (a new run of it shows
 // again). ponytail: module memory, so a reload of the mod shows a dismissed file job again until its file goes quiet
 // for an hour. Upgrade: keep them in $.state beside the tasks.
@@ -191,8 +192,10 @@ export function bgRowOf(id: string, t: Bg, now: number, output?: string): Row | 
   const shown = `${t.isLate ? '≥ ' : ''}${clock(el)}`
   if (t.endedAt !== undefined) {
     const isOk = t.status === undefined || t.status === 'completed'
-    const tail = `${isOk ? 'done in' : `${t.status ?? 'ended'} after`} ${shown}`
-    return { id: `bg-${id}`, title: t.title, f: isOk ? 1 : undefined, counts: '', tail, state: isOk ? 'done' : 'fail', isTimer: !t.isCounted }
+    const isStop = t.status === 'stopped' || t.status === 'killed'
+    const tail = `${isOk ? 'done in' : `${isStop ? 'stopped' : t.status} after`} ${shown}`
+    const state = isOk ? 'done' : isStop ? 'stop' : 'fail'
+    return { id: `bg-${id}`, title: t.title, f: isOk ? 1 : undefined, counts: '', tail, state, isTimer: !t.isCounted }
   }
   // an end in the description ("until ~21:35") is the clock to trust; a percent in the output may be a part of the job
   const p = output === undefined || t.isUntil ? undefined : progressOf(output)
@@ -220,12 +223,12 @@ export const isMine = (j: Job, session: string, root: string) =>
 export function rowOf(id: string, j: Job, now: number): Row | undefined {
   const updated = j.updated ?? now
   const age = now - updated
-  if (j.finished && age > KEEP_FINISHED_S) return undefined
+  if ((j.finished || j.stopped) && age > KEEP_FINISHED_S) return undefined
   const done = j.done ?? 0
   const total = j.total ?? 0
   const unit = j.unit ? ` ${j.unit}` : ''
-  const state: State = j.finished ? 'done' : age > STALE_S ? 'stale' : 'run'
-  let tail = state === 'done' ? 'done' : state === 'stale' ? `stalled ${dur(age)}` : ''
+  const state: State = j.finished ? 'done' : j.stopped ? 'stop' : age > STALE_S ? 'stale' : 'run'
+  let tail = state === 'done' ? 'done' : state === 'stop' ? 'stopped' : state === 'stale' ? `stalled ${dur(age)}` : ''
   if (state === 'run' && total > 0) {
     let eta = j.eta_s ?? undefined
     if (eta === undefined) {
@@ -517,9 +520,9 @@ const promptOf = (text: string) => {
 }
 
 // Theme keys for the text, the same hues as hex for the desktop's SVG bar (an image: no theme there).
-const COLOR = { run: 'claude', stale: 'warning', done: 'success', fail: 'error' } as const
-const HEX = { run: '#D97757', stale: '#E0A030', done: '#4EBA65', fail: '#E5534B' } as const
-const ICON = { run: '●', stale: '◌', done: '✓', fail: '✕' } as const
+const COLOR = { run: 'claude', stale: 'warning', done: 'success', fail: 'error', stop: 'inactive' } as const
+const HEX = { run: '#D97757', stale: '#E0A030', done: '#4EBA65', fail: '#E5534B', stop: '#999999' } as const
+const ICON = { run: '●', stale: '◌', done: '✓', fail: '✕', stop: '■' } as const
 // ponytail: the desktop draws cells ~7.85 px wide (measured on Windows 11 at 100 % zoom); an SVG is sized in px, so
 // a bar that fills its column is cells * this. Another zoom leaves the bar a little short or long of its column.
 const CELL_PX = 7.85
@@ -651,14 +654,26 @@ export const register: Register = on => {
     return ran
   })
 
-  // Its end: the notification row (<task-id>, <status>) as the session keeps it.
+  // A stopped shell sends no notification: its end is the stop.
+  on('tool.call', { tool: ['TaskStop', 'KillShell'] }, async ($, e, next) => {
+    const ran = await next(e)
+    const t = bg.get(String((e as { task_id?: unknown; shell_id?: unknown }).task_id ?? (e as { shell_id?: unknown }).shell_id))
+    if (t && t.endedAt === undefined && !('deny' in ran) && !ran.isError) {
+      Object.assign(t, { endedAt: (await $.clock.now()) / 1000, status: 'stopped' })
+      await save($)
+    }
+    return ran
+  })
+
+  // Its end: the notification row (<task-id>, <status>) as the session keeps it; one after a turn's end found the
+  // shell gone still names how it ended.
   on('session.append', async ($, e, next) => {
     const text = JSON.stringify(e.message.content ?? '')
     if (text.includes('<task-id>')) {
       const now = (await $.clock.now()) / 1000
       for (const [, id = '', status] of text.matchAll(/<task-id>([^<]+)<\/task-id>[\s\S]*?<status>([^<]+)<\/status>/g)) {
         const t = bg.get(id)
-        if (t && t.endedAt === undefined) Object.assign(t, { endedAt: now, status })
+        if (t && t.status === undefined) Object.assign(t, { endedAt: t.endedAt ?? now, status })
         if (t && !isTurn) woke.push(id)
       }
       await save($)

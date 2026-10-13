@@ -58,9 +58,12 @@ the three chats' engines together use ~5 % of one core.
 
 ![done](docs/row-done.png)
 
-**Failed / killed.** Red, with the time it ran.
+**Failed.** Red, with the time it ran.
 
-![failed / killed](docs/row-failed.png)
+![failed](docs/row-failed.png)
+
+**Stopped.** Grey ■ `stopped after 12:04`: a task Claude stopped (TaskStop), or a job whose log `progress_tail.ps1`
+sees no process writing any more. It leaves like a done row.
 
 The timer and spinner rows animate; the bars do not jitter: a timer's text changes once a minute.
 
@@ -181,6 +184,7 @@ A job writes `~/.claude/progress/<id>.json` every ~2 s, atomically (write `<id>.
 ```
 
 Times are unix seconds. `eta_s: null`: the mod estimates it from the rate. No `total`: a count without a bar.
+`"stopped": true` (optional): it ended short of its total on purpose; the row turns grey and leaves like a done one.
 Whose chat shows it: `session` set = only that Claude session (the mod sets `CLAUDE_JOB_SESSION` for everything its
 session launches and the helpers copy it); else `project` = sessions whose project holds that path (a worktree
 session counts as its repository); neither = every session.
@@ -189,8 +193,8 @@ Helpers in `bin/` (the folder is on `PATH` for commands Claude runs):
 
 - **Python** `bin/progress.py`: `report(id, title, done, total, unit="it", eta_s=None, finished=False)`; call it
   every step, it writes at most every 2 s.
-- **Any log, no code change** `bin/progress_tail.ps1`: tails a log by regex and exits when the job ends (or after
-  30 quiet minutes). Defaults read rsl_rl (`Learning iteration 1234/3000`, `ETA: 0:12:00`):
+- **Any log, no code change** `bin/progress_tail.ps1`: tails a log by regex and exits when the job ends, when nothing
+  holds the log open for writing any more (the job was stopped: the row says so), or after 30 quiet minutes. Defaults read rsl_rl (`Learning iteration 1234/3000`, `ETA: 0:12:00`):
   ```powershell
   Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File <mod>\bin\progress_tail.ps1 -Log D:\runs\train.log'
   ```

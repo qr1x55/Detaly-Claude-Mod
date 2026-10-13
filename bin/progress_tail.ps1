@@ -1,5 +1,6 @@
 # Tails a job's log and writes ~/.claude/progress/<Id>.json for the Detaly mod, so the job needs no change.
-# Exits when the count reaches the total, or when the log has been quiet for -IdleMin minutes.
+# Exits when the count reaches the total, or when the log has been quiet for -IdleMin minutes. A log nobody holds open
+# for writing any more, quiet for 30 s, is a stopped job (killed, or crashed past its last line): written as stopped.
 # Defaults read rsl_rl logs ("Learning iteration 1234/3000", "ETA: 0:12:00"); counts start at the first iteration
 # the log shows (a resumed run is 0 % at its start). -Absolute: take "k/N" as is (logs counting 1..N).
 #   progress_tail.ps1 -Log D:\runs\train.log
@@ -31,9 +32,15 @@ function Seconds([string]$s) {
     $d * 86400 + $t
 }
 
-function Write-Job($done, $total, $eta, $finished) {
+# the job still has its log open: a share that denies writers is refused while one holds it
+function Test-Writer {
+    try { (([IO.File]::Open($Log, 'Open', 'Read', 'Read')).Close()); $false } catch { $true }
+}
+
+# `updated` is the log's last write, not this poll's: a dead job's row goes stalled, not on running
+function Write-Job($done, $total, $eta, $finished, $updated, $stopped) {
     $job = [ordered]@{ title = $Title; done = $done; total = $total; unit = $Unit; started = $started; eta_s = $eta
-        updated = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); finished = $finished
+        updated = $updated; finished = $finished; stopped = $stopped
         session = $env:CLAUDE_JOB_SESSION; project = $project }
     [IO.File]::WriteAllText($tmp, ($job | ConvertTo-Json -Compress))  # UTF-8, no BOM
     try {
@@ -59,11 +66,16 @@ while ($true) {
         $total = $n - $base
         $e = if ($Eta) { $t | Select-String $Eta | Select-Object -Last 1 }
         $etaS = if ($e) { Seconds $e.Matches[0].Groups[1].Value } else { $null }
-        Write-Job $done $total $etaS ($done -ge $total)
-        if ($done -ge $total) { break }
     }
     $li = Get-Item $Log -ErrorAction SilentlyContinue
     $last = if ($li) { $li.LastWriteTime } else { [DateTimeOffset]::FromUnixTimeSeconds($started).LocalDateTime }
-    if (((Get-Date) - $last).TotalMinutes -gt $IdleMin) { break }  # the job died; the mod greys it out, then drops it
+    $quiet = ((Get-Date) - $last).TotalSeconds
+    if ($m) {
+        $finished = $done -ge $total
+        $stopped = -not $finished -and $quiet -gt 30 -and -not (Test-Writer)
+        Write-Job $done $total $etaS $finished ([DateTimeOffset]::new($last).ToUnixTimeSeconds()) $stopped
+        if ($finished -or $stopped) { break }
+    }
+    if ($quiet -gt $IdleMin * 60) { break }  # open but silent: the mod shows it stalled, then drops it
     Start-Sleep 2
 }
