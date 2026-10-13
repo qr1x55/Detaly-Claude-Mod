@@ -1,0 +1,6 @@
+{
+  "name": "detaly",
+  "description": "Detaly: live progress bars above the prompt for long jobs in Claude Code",
+  "owner": { "name": "qr1x55" },
+  "plugins": [{ "name": "detaly", "source": "./" }]
+}

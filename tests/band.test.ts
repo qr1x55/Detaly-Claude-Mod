@@ -1,0 +1,548 @@
+import type { On } from 'claude-code'
+import { expect, mock, test } from 'claude-code/testing'
+
+import { bgRowOf, chargesOf, leftAt, spentText, untilOf } from '../hooks/register'
+
+// local "HH:MM" of unix second t, as the band writes it
+const hm = (t: number) => new Date(t * 1000).toTimeString().slice(0, 5)
+
+const T0 = 1_800_000_000 // unix s
+
+const BAND = {
+  plugin: 'detaly',
+  component: 'AbovePrompt',
+  props: {
+    hasSurvey: false,
+    isWorking: false,
+    maxRows: 20,
+    bodyColumns: 100,
+    scroll: { offset: 0, bodyRows: 10 },
+    view: {},
+  },
+} as const
+
+// A session 's1' in a worktree of D:\dev\game, over a progress folder of `files` (name -> job or raw text) and a
+// registry of other sessions (`sessions`: id -> what that session's mod published); `written` keeps what s1 publishes.
+function world(
+  on: On,
+  files: () => Record<string, unknown>,
+  output = (path: string) => '',
+  sessions: () => Record<string, unknown> = () => ({}),
+) {
+  const clock = mock.clock(on, { now: T0 * 1000 })
+  mock.env(on, { USERPROFILE: 'C:\\Users\\u' })
+  const env: Record<string, string | undefined> = {}
+  const written: Record<string, string> = {}
+  on('env.set', ($, e) => {
+    env[e.name] = e.value
+    return { value: undefined }
+  })
+  on('session.id', () => ({ value: 's1' }))
+  on('session.root', () => ({ value: 'D:\\dev\\game\\.claude\\worktrees\\brave-x' }))
+  on('session.messages', () => ({
+    value: [
+      { role: 'user', text: 'You are operating in a git worktree.', toolUses: [] }, // the engine's own row
+      { role: 'user', text: '<system-reminder>notes</system-reminder>train the walking net', toolUses: [] },
+    ],
+  }) as never)
+  on('session.start', ($, e) => ({ cwd: e.cwd }))
+  on('command.register', () => ({ value: undefined }) as never)
+  on('ui.render', () => ({ type: 'Box' as const })) // the engine's own (empty) band
+  const entry = (name: string) => ({ name, kind: 'file' as const, size: 1, mtimeMs: clock.now(), isLink: false })
+  on('fs.list', ($, e) => {
+    if (e.path.endsWith('sessions')) return { value: Object.keys(sessions()).map(id => entry(`${id}.json`)) }
+    expect(e.path).toBe('C:\\Users\\u\\.claude\\progress')
+    return { value: Object.keys(files()).map(entry) }
+  })
+  on('fs.read', ($, e) => {
+    if (e.path.endsWith('.output')) return { value: output(e.path) }
+    const name = e.path.split(/[\\/]/).pop()!
+    if (name.endsWith('.sync')) {
+      const asked = Object.entries(written).find(([path]) => path.endsWith(name))?.[1]
+      if (asked === undefined) return { value: '' } // none yet
+      return { value: asked }
+    }
+    if (/[\\/]sessions[\\/]/.test(e.path)) return { value: JSON.stringify(sessions()[name.slice(0, -5)]) }
+    const f = files()[name]
+    return { value: typeof f === 'string' ? f : JSON.stringify(f) }
+  })
+  on('fs.write', ($, e) => {
+    written[e.path] = e.text
+    return { value: undefined }
+  })
+  return { clock, env, written }
+}
+
+test('own session and own project only; bar, percent, counts, ETA; stalled; old finished dropped', async ($, on) => {
+  const job = (more: object) => ({ done: 50, total: 200, unit: 'it', started: T0 - 100, updated: T0, ...more })
+  const files = {
+    'train5.json': job({ title: 'train5', done: 1850, total: 3000, eta_s: 1020, session: 's1', project: 'D:\\x' }),
+    'theirs.json': job({ title: 'theirs', session: 's2', project: 'D:\\dev\\game' }),
+    'manual.json': job({ title: 'manual', session: null, project: 'D:\\dev\\game\\spikes\\rl', eta_s: 90 }),
+    'elsewhere.json': job({ title: 'elsewhere', project: 'D:\\dev\\gameOther' }),
+    'dl.json': job({ title: 'dl', unit: 'MB', updated: T0 - 90 }),
+    'old.json': job({ title: 'old', finished: true, updated: T0 - 400 }),
+    'bad.json': '{"title": "half', // caught mid-write, never seen whole: no row
+  }
+  const { clock, env } = world(on, () => files)
+
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  expect(env.CLAUDE_JOB_SESSION).toBe('s1')
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...BAND, surface })
+    // the numbers: text on the terminal, inside the bar's picture (its alt) on the desktop
+    const numbers = async () => [(await ui.find({ key: 'train5' }))?.text, ...(await ui.findAll({ type: 'Svg' })).map(svg => svg.props.alt)].join(' | ')
+    const rows = (await ui.findAll({ type: 'Box' })).filter(b => b.key !== undefined && !/-name$|^tab|^group-|^info$|^stat-/.test(b.key)).map(b => b.key)
+    expect(rows).toEqual(['dl', 'manual', 'train5'])
+    expect((await ui.find({ key: 'train5' }))?.text).toContain('train5')
+    expect(await numbers()).toContain('61 %')
+    expect(await numbers()).toContain('1850 / 3000 it')
+    expect((await ui.find({ key: 'train5' }))?.text).toContain(`17 min left · ${hm(T0 + 1020)}`)
+    expect((await ui.find({ key: 'dl' }))?.text).toContain('stalled 2 min')
+    expect((await ui.find({ key: 'manual' }))?.text).toContain('2 min left')
+    expect(await ui.findAll({ type: 'Svg' })).toHaveLength(surface === 'desktop' ? 3 : 0) // a bar each, its numbers inside
+    await ui.unmount()
+  }
+})
+
+test('background shells: timer against the described estimate, progress from output, end from the notification', async ($, on) => {
+  let output = ''
+  const outputOf = (path: string) => (path.includes('aaa111') ? output : '') // the eval prints progress, the render nothing
+  const { clock } = world(on, () => ({}), outputOf)
+  on('fs.stat', ($, e) => ({ value: { kind: 'file' as const, size: outputOf(e.path).length, mtimeMs: clock.now(), isLink: false } }))
+  let n = 0
+  on('tool.call', () => {
+    n += 1
+    const id = ['aaa111', 'bbb222', 'ddd444'][n - 1]
+    return { result: {} as never, text: `Command running in background with ID: ${id}. Output is being written to: C:\\T\\tasks\\${id}.output` }
+  })
+  on('classic.Stop', () => ({}))
+
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: 'Bash', command: 'python eval.py', description: 'Eval train5, 6 tests, ~15 min', run_in_background: true })
+  await $.tool.call({ tool: 'PowerShell', command: 'blender -b scene.blend -a', description: 'Render clip', run_in_background: true })
+  const at = hm(T0 + 1200)
+  await $.tool.call({ tool: 'Bash', command: 'sleep 1200', description: `train6 check at ~${at} (training)`, run_in_background: true })
+  await clock.advance(300_000)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const eval5 = async () => (await ui.find({ key: 'bg-aaa111' }))?.text
+  // one clock per timer row: down to its estimate, or up from its start
+  expect(await eval5()).toContain(`~10 min left · ${hm(T0 + 900)}`)
+  expect(await eval5()).not.toContain('5:00')
+  expect((await ui.find({ key: 'bg-bbb222' }))?.text).toContain('5 min') // whole minutes: the row changes once a minute
+  const check = (await ui.find({ key: 'bg-ddd444' }))?.text ?? ''
+  expect(check).toContain(`train6 check (training)~15 min left · ${at}`) // the clock time leaves the title
+  expect(check.split(at)).toHaveLength(2)
+  const alts = async () => (await ui.findAll({ type: 'Svg' })).map(svg => svg.props.alt)
+  // timers: a ring and an animated wait for a bar each
+  expect(await alts()).toEqual(['31 %', '31 % of the wait', 'running', 'waiting', '25 %', '25 % of the wait'])
+
+  output = 'loading\n 42%|████▏     | 42/100 [00:10<00:14,  4.1it/s]'
+  await clock.advance(2000)
+  expect(await alts()).toEqual(['42 %  42 / 100', 'running', 'waiting', '25 %', '25 % of the wait']) // counted: the dot, its numbers in the bar
+  expect(await eval5()).toContain('~7 min left') // 302 s for 42 %: 417 s for the 58 % left
+  expect(await eval5()).not.toContain('~42')
+
+  await $.session.append({
+    message: { type: 'user', content: [{ type: 'text', text: '<task-notification><task-id>aaa111</task-id><status>completed</status></task-notification>' }] },
+  } as never)
+  await clock.advance(2000)
+  expect(await eval5()).toContain('done')
+
+  // a reload forgot them; the turn's end lists what still runs
+  const later = hm(T0 + 1800)
+  const live = [
+    { id: 'ccc333', type: 'shell', status: 'running', description: 'Render video' },
+    { id: 'eee555', type: 'shell', status: 'running', description: `train7 check at ~${later}` },
+  ]
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: live } as never)
+  await clock.advance(2000)
+  expect((await ui.find({ key: 'bg-ccc333' }))?.text).toContain('≥ <1 min')
+  expect((await ui.find({ key: 'bg-eee555' }))?.text).toContain(`train7 check~25 min left · ${later}`) // a clock time survives the reload
+  expect((await ui.find({ key: 'bg-bbb222' }))?.text).toContain('done')
+})
+
+test('ETA from the rate when the job gives none; nothing drawn without jobs', async ($, on) => {
+  let done = 0
+  const { clock } = world(on, () =>
+    done === 0 ? {} : { 'job.json': { title: 'job', done, total: 100, unit: 'it', started: T0, updated: clock.now() / 1000 } },
+  )
+
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await ui.find({ type: 'Text' })).toBeUndefined()
+
+  done = 10 // first seen at T0+2 s with 10 done
+  await clock.advance(10_000)
+  done = 20 // at T0+20 s: 10 it in 18 s, 80 left -> 144 s
+  await clock.advance(10_000)
+  expect((await ui.find({ type: 'Svg' }))?.props.alt).toBe('20 %  20 / 100 it')
+  expect((await ui.find({ key: 'job' }))?.text).toContain('2 min left')
+})
+
+test('the end time names a later day', () => {
+  const late = new Date(2027, 0, 15, 23, 50).getTime() / 1000
+  expect(leftAt(late, 1800)).toBe('30 min left · 00:20 +1d')
+  expect(leftAt(late, 300)).toBe('5 min left · 23:55')
+})
+
+test('a clock time in the description is the end', () => {
+  expect(untilOf(T0, `train6 check at ~${hm(T0 + 1200)} (training)`)).toBe(1200)
+  expect(untilOf(T0, `render, до ${hm(T0 - 3600)}`)).toBe(82_800) // passed today: tomorrow
+  expect(untilOf(T0, 'ETA 0:12:00')).toBeUndefined()
+  expect(untilOf(T0, 'train6 ~40 min')).toBeUndefined()
+})
+
+test("a described end outweighs a percent in the output (a part of the job's)", () => {
+  const t = { title: 'After train8: full eval', started: T0 - 1800, expectS: 3600, isUntil: true }
+  const row = bgRowOf('t9', t, T0, 'eval  2%|▏         | 3/150')
+  expect(row?.isTimer).toBe(true)
+  expect(row?.tail).toBe(`~30 min left · ${hm(T0 + 1800)}`)
+})
+
+test('minimized: the session figures over this chat\'s rows', async ($, on) => {
+  const { clock } = world(on, () => ({ 'a.json': { title: 'Resize images', done: 5, total: 10, updated: T0, started: T0 - 10, session: 's1' } }))
+  on('session.usage', () => ({
+    value: {
+      startedAt: (T0 - 7200) * 1000,
+      context: { tokens: 148_000, window: 1_000_000, percent: 15 },
+      rateLimits: [
+        { kind: 'five_hour', percentUsed: 2, resetsAt: new Date((T0 + 3600) * 1000).toISOString() },
+        { kind: 'seven_day', percentUsed: 24 },
+      ],
+      cost: { usd: 4.1 },
+    },
+  }))
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const texts = async () => (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  // the tabs: the same figures in ⓘ Info's card
+  expect(await ui.find({ key: 'info-btn' })).toBeDefined()
+  await ui.press({ key: 'info-btn' }) // pinned: shown for good, no hover to reveal it (the engine refuses one)
+  const pinned = (await ui.findAll({ type: 'Box' })).find(b => b.props.position === 'absolute' && /5-hour limit/.test(b.text ?? ''))
+  expect(pinned?.props).toMatchObject({ display: 'flex' })
+
+  await ui.press({ key: 'info-btn' })
+  expect(await texts()).toContain(`5-hour limit 2 % · resets ${hm(T0 + 3600)}`)
+  await ui.press({ key: 'mini' })
+  expect(await texts()).toEqual(expect.arrayContaining(['ctx 15%', '5h 2%', 'week 24%', '$4.10']))
+  // a limit's ring, filled to its share
+  const rings = (await ui.findAll({ type: 'Svg' })).filter(s => s.props.alt === 'week 24%')
+  expect(rings).toHaveLength(1)
+  expect(String(rings[0]?.props.source)).toContain('#4A8FE7')
+  expect(await texts()).toContain(`5-hour limit 2 % · resets ${hm(T0 + 3600)}`) // the hover card
+})
+
+test('minimized with no jobs of its own: the strip stays, figures and ▴ Tabs', async ($, on) => {
+  const { clock } = world(on, () => ({}))
+  on('session.usage', () => ({ value: { startedAt: T0 * 1000, context: { window: 1_000_000, percent: 3 }, rateLimits: [] } }))
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await $.command.run({ command: 'detaly', args: '' } as never)
+  await ui.press({ key: 'mini' })
+  expect(await ui.find({ type: 'Text', text: 'ctx 3%' })).toBeDefined()
+  expect(await ui.find({ key: 'expand' })).toBeDefined()
+})
+
+test('background shells outlive a reload of the mod: they are kept in the session state', async ($, on) => {
+  const { clock } = world(on, () => ({}))
+  // what a previous load of the mod kept: a render started 2 min before this load, until a clock time
+  const end = hm(T0 + 600)
+  const kept = [['fff666', { title: 'Render a5', started: T0 - 120, expectS: 720, isUntil: true }]]
+  const writes: unknown[] = []
+  on('state.get', ($, e, next) => (e.key === 'tasks' ? { value: { value: kept, version: 1 } } : next(e)) as never)
+  on('state.set', ($, e, next) => {
+    writes.push(e.value)
+    return next(e)
+  })
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await ui.find({ key: 'bg-fff666' }))?.text).toContain(`Render a5~10 min left · ${end}`)
+  await $.session.append({
+    message: { type: 'user', content: [{ type: 'text', text: '<task-notification><task-id>fff666</task-id><status>completed</status></task-notification>' }] },
+  } as never)
+  expect(writes.at(-1)).toEqual([['fff666', expect.objectContaining({ endedAt: T0, status: 'completed' })]])
+})
+
+test('a quick task never shows; a finished one stays as long as it ran (15 s to 5 min)', async ($, on) => {
+  const { clock } = world(on, () => ({}))
+  let n = 0
+  on('tool.call', () => {
+    n += 1
+    return { result: {} as never, text: `Command running in background with ID: q${n}. Output is being written to: C:\T\tasks\q${n}.output` }
+  })
+  const end = (id: string) =>
+    $.session.append({
+      message: { type: 'user', content: [{ type: 'text', text: `<task-notification><task-id>${id}</task-id><status>completed</status></task-notification>` }] },
+    } as never)
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await $.tool.call({ tool: 'Bash', command: 'sleep 5', description: 'Quick wait', run_in_background: true })
+  await $.tool.call({ tool: 'Bash', command: 'sleep 60', description: 'Minute wait', run_in_background: true })
+  await clock.advance(6000)
+  expect(await ui.find({ key: 'bg-q1' })).toBeUndefined() // under 10 s: not shown
+  await end('q1')
+  await clock.advance(6000)
+  expect(await ui.find({ key: 'bg-q1' })).toBeUndefined() // ended under 10 s: never shown
+  expect(await ui.find({ key: 'bg-q2' })).toBeDefined()
+  await clock.advance(48_000)
+  await end('q2')
+  await clock.advance(50_000)
+  expect((await ui.find({ key: 'bg-q2' }))?.text).toContain('done in 1:00')
+  await clock.advance(12_000)
+  expect(await ui.find({ key: 'bg-q2' })).toBeUndefined() // ran 60 s: gone 60 s after its end
+})
+
+test('a name is one line; one too long for its column shows whole in a card while hovered', async ($, on) => {
+  const long = 'Export all frames of the RE-style video to PNG for review, then pack them into an atlas'
+  const { clock } = world(on, () => ({
+    'a.json': { title: 'short', done: 1, total: 2, updated: T0, started: T0 - 10 },
+    'c.json': { title: 'Resize images ~6 min', done: 1, total: 2, updated: T0, started: T0 - 10 }, // 20 letters in 18 cells: fits drawn
+    'b.json': { title: long, done: 1, total: 2, updated: T0, started: T0 - 10 },
+  }))
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const cards = (await ui.findAll({ type: 'Box' })).filter(b => b.props.display === 'none' && b.props.position === 'absolute' && b.props.left === 5) // a name card: over the name cell
+  expect(cards).toHaveLength(1) // the names that fit need none
+  expect(cards[0]?.text).toBe(long)
+})
+
+test('a ✕ in place of the icon on hover: a finished row leaves at once, a running one after "stop tracking? yes"', async ($, on) => {
+  const { clock } = world(on, () => ({
+    'run.json': { title: 'running', done: 1, total: 2, updated: T0, started: T0 - 10 },
+    'old.json': { title: 'finished', done: 2, total: 2, updated: T0, started: T0 - 60, finished: true },
+  }))
+  on('tool.call', () => ({ result: {} as never, text: 'Command running in background with ID: zz1. Output is being written to: C:\T\zz1.output' }))
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: 'Bash', command: 'sleep 30', description: 'Render', run_in_background: true })
+  await clock.advance(30_000)
+  await $.session.append({
+    message: { type: 'user', content: [{ type: 'text', text: '<task-notification><task-id>zz1</task-id><status>completed</status></task-notification>' }] },
+  } as never)
+  await clock.advance(2000)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await ui.press({ key: 'x-run' }) // running: asks first
+  expect((await ui.find({ key: 'run' }))?.text).toContain('Stop tracking')
+  await ui.press({ key: 'no-run' })
+  expect((await ui.find({ key: 'run' }))?.text).not.toContain('Stop tracking')
+  await ui.press({ key: 'x-bg-zz1' })
+  expect(await ui.find({ key: 'bg-zz1' })).toBeUndefined()
+  await ui.press({ key: 'x-old' })
+  expect(await ui.find({ key: 'old' })).toBeUndefined()
+  await clock.advance(2000)
+  expect(await ui.find({ key: 'old' })).toBeUndefined() // stays hidden: the same run
+  await ui.press({ key: 'x-run' })
+  await ui.press({ key: 'yes-run' })
+  await clock.advance(2000)
+  expect(await ui.find({ key: 'run' })).toBeUndefined() // still running, no longer followed
+})
+
+test("tabs: this chat, All, and another chat that publishes its jobs; a tab's Close, All's Sync brings it back", async ($, on) => {
+  const other = {
+    session: 's2',
+    label: 'website · render the trailer',
+    updated: T0,
+    rows: [{ id: 'bg-r1', title: 'Render trailer', f: 0.5, counts: '50 / 100', tail: '~1 min left · 11:01', state: 'run' }],
+  }
+  const { clock, written } = world(
+    on,
+    () => ({ 'mine.json': { title: 'Resize images', done: 5, total: 10, updated: T0, started: T0 - 10, session: 's1' } }),
+    () => '',
+    () => ({ s2: other }),
+  )
+  on('tool.call', () => ({ result: {} as never, text: 'Command running in background with ID: t1. Output is being written to: C:\T\t1.output' }))
+  on('classic.Stop', () => ({}))
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+
+  // what this chat publishes for the others: its label (folder and first message) and its background shells
+  const mine = JSON.parse(Object.entries(written).find(([path]) => /sessions[\\/]s1\.json$/.test(path))?.[1] ?? '{}')
+  expect(mine.label).toBe('game · train the walking net')
+
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const tabs = async () => (await ui.findAll({ type: 'Button' })).map(b => b.key).filter(k => k?.startsWith('tab:'))
+  expect(await tabs()).toEqual(['tab:all', 'tab:s1', 'tab:s2'])
+  expect(await ui.find({ key: 'mine' })).toBeDefined() // this chat's tab is open
+  expect(await ui.find({ key: 's2:bg-r1' })).toBeUndefined()
+
+  await ui.press({ key: 'tab:s2' })
+  expect(await ui.find({ key: 's2:bg-r1' })).toBeDefined()
+  expect(await ui.find({ key: 'mine' })).toBeUndefined()
+
+  await ui.press({ key: 'tab:all' }) // every chat, a heading each
+  expect(await ui.find({ key: 'mine' })).toBeDefined()
+  expect(await ui.find({ key: 's2:bg-r1' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'website · render the trailer' })).toBeDefined()
+
+  expect(await ui.find({ key: 'close:s1' })).toBeUndefined() // this chat's tab does not close
+  await ui.press({ key: 'close:s2' }) // closed: its tab and its rows leave
+  expect(await tabs()).toEqual(['tab:all', 'tab:s1'])
+  expect(await ui.find({ key: 's2:bg-r1' })).toBeUndefined()
+
+  // a running shell this chat stopped following comes back with its tab's Sync; All's Sync brings the closed tab
+  await $.tool.call({ tool: 'Bash', command: 'sleep 99', description: 'Bake lightmaps', run_in_background: true })
+  await clock.advance(12_000)
+  await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 't1', type: 'shell', status: 'running', description: 'Bake lightmaps' }] } as never)
+  await ui.press({ key: 'x-bg-t1' })
+  await ui.press({ key: 'yes-bg-t1' })
+  expect(await ui.find({ key: 'bg-t1' })).toBeUndefined()
+  await ui.press({ key: 'sync:s1' })
+  expect(await ui.find({ key: 'bg-t1' })).toBeDefined()
+  expect(await tabs()).toEqual(['tab:all', 'tab:s1'])
+  await ui.press({ key: 'sync:all' })
+  expect(await tabs()).toEqual(['tab:all', 'tab:s1', 'tab:s2'])
+})
+
+test("another chat's Sync asks it to sync itself; Clear takes a tab's finished rows", async ($, on) => {
+  const other = {
+    session: 's2',
+    label: 'website · x',
+    updated: T0,
+    rows: [
+      { id: 'bg-r1', title: 'Render', f: 0.5, counts: '', tail: '', state: 'run' },
+      { id: 'bg-r2', title: 'Encode', f: 1, counts: '', tail: 'done', state: 'done' },
+    ],
+  }
+  const { clock, written } = world(
+    on,
+    () => ({
+      'a.json': { title: 'Resize images', done: 5, total: 10, updated: T0, started: T0 - 10, session: 's1' },
+      'b.json': { title: 'Pack atlas', done: 10, total: 10, updated: T0, started: T0 - 10, session: 's1', finished: true },
+    }),
+    () => '',
+    () => ({ s2: other }),
+  )
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+
+  await ui.press({ key: 'clear:s1' }) // this chat's finished row leaves, the running one stays
+  expect(await ui.find({ key: 'b' })).toBeUndefined()
+  expect(await ui.find({ key: 'a' })).toBeDefined()
+  await ui.press({ key: 'tab:s2' })
+  await ui.press({ key: 'clear:s2' })
+  expect(await ui.find({ key: 's2:bg-r2' })).toBeUndefined()
+  expect(await ui.find({ key: 's2:bg-r1' })).toBeDefined()
+
+  // s2's Sync: its hidden row back here, and a request s2's mod picks up
+  await ui.press({ key: 'sync:s2' })
+  expect(await ui.find({ key: 's2:bg-r2' })).toBeDefined()
+  const asked = Object.keys(written).find(path => /sessions[\\/]s2\.sync$/.test(path))
+  expect(asked).toBeDefined()
+})
+
+test('minimized: this chat alone, no tabs; ▴ brings them back', async ($, on) => {
+  const other = { session: 's2', label: 'website · x', updated: T0, rows: [{ id: 'bg-r1', title: 'Render', f: 0.5, counts: '', tail: '', state: 'run' }] }
+  const { clock } = world(
+    on,
+    () => ({ 'a.json': { title: 'Resize images', done: 5, total: 10, updated: T0, started: T0 - 10, session: 's1' } }),
+    () => '',
+    () => ({ s2: other }),
+  )
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await ui.press({ key: 'tab:all' })
+  await ui.press({ key: 'mini' })
+  expect(await ui.find({ key: 'tab:all' })).toBeUndefined()
+  expect(await ui.find({ key: 's2:bg-r1' })).toBeUndefined()
+  expect(await ui.find({ key: 'a' })).toBeDefined()
+  await ui.press({ key: 'sync-mini' }) // this chat's sync, the band stays minimized
+  expect(await ui.find({ key: 'a' })).toBeDefined()
+  await ui.press({ key: 'expand' })
+  expect(await ui.find({ key: 's2:bg-r1' })).toBeDefined() // back on the tab it was on
+})
+
+test('the band never outgrows its room: thin rows, then pages', async ($, on) => {
+  const jobs: Record<string, unknown> = {}
+  for (let i = 0; i < 8; i++) jobs[`j${i}.json`] = { title: `Job ${i}`, done: i, total: 10, updated: T0, started: T0 - 10, session: 's1' }
+  const { clock } = world(on, () => jobs)
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  // 8 job rows under the tabs and their gap, in a band of 10 less a row of slack: 7 lines; two-line rows overflow, so
+  // the rows go thin (one line), 7 a page
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, maxRows: 10 }, surface: 'desktop' })
+  const order = async () =>
+    (await ui.findAll({ type: 'Box' }))
+      .map(b => b.key ?? '')
+      .filter(k => /^(j\d+|tab-all|head-s1|pad)$/.test(k))
+      .join(' ')
+  const open = (page: number) => ui.post({ page }, { in: 'pager' })
+  expect(await order()).toBe('tab-all j0 j1 j2 j3 j4 j5 j6')
+  expect((await ui.find({ key: 'j0' }))?.props.height).toBe(1)
+  expect((await ui.find({ key: 'pager' }))?.props).toMatchObject({ props: { page: 0, pages: 2, rows: 7 } })
+  await open(1)
+  expect(await order()).toBe('tab-all j7 pad') // every page as tall as the room
+  // All: a page that opens inside a chat's rows repeats its heading
+  await ui.press({ key: 'tab:all' })
+  expect(await order()).toBe('tab-all head-s1 j0 j1 j2 j3 j4 j5')
+  await open(1)
+  expect(await order()).toBe('tab-all head-s1 j6 j7 pad')
+})
+
+test('a page holds 10 job rows at most; rows that fit stay two lines tall', async ($, on) => {
+  const jobs: Record<string, unknown> = {}
+  for (let i = 0; i < 12; i++) jobs[`j${i}.json`] = { title: `Job ${i}`, done: i, total: 20, updated: T0, started: T0 - 10, session: 's1' }
+  const { clock } = world(on, () => jobs)
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, maxRows: 40 }, surface: 'desktop' })
+  const keys = async () =>
+    (await ui.findAll({ type: 'Box' })).map(b => b.key ?? '').filter(k => /^j\d+$/.test(k))
+  // 12 two-line rows fit 37 lines, but a page holds 10: two pages, the rows two lines tall
+  expect(await keys()).toHaveLength(10)
+  expect((await ui.find({ key: 'j0' }))?.props.height).toBe(2)
+  await ui.post({ page: 1 }, { in: 'pager' })
+  expect(await keys()).toHaveLength(2) // the files come by name: j0 j1 j10 j11 j2 …
+  // 12 thin rows in 17 lines: 10, then 2
+  await ui.unmount()
+  const small = await $.ui.mount({ ...BAND, props: { ...BAND.props, maxRows: 20 }, surface: 'desktop' })
+  const small_keys = async () => (await small.findAll({ type: 'Box' })).map(b => b.key ?? '').filter(k => /^j\d+$/.test(k))
+  await small.post({ page: 0 }, { in: 'pager' }) // the open page is the band's, kept across drawings
+  expect(await small_keys()).toHaveLength(10)
+  expect((await small.find({ key: 'j0' }))?.props.height).toBe(1)
+  await small.post({ page: 1 }, { in: 'pager' })
+  expect(await small_keys()).toHaveLength(2)
+})
+
+test('/detaly opens the All tab, in a chat with no jobs of its own too', async ($, on) => {
+  const other = { session: 's2', label: 'website · x', updated: T0, rows: [{ id: 'bg-r1', title: 'Render', f: 0.5, counts: '', tail: '', state: 'run' }] }
+  const { clock } = world(on, () => ({}), () => '', () => ({ s2: other }))
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await ui.find({ key: 's2:bg-r1' })).toBeUndefined() // nothing of its own: no band
+  await $.command.run({ command: 'detaly', args: '' } as never)
+  await clock.advance(2000)
+  expect(await ui.find({ key: 's2:bg-r1' })).toBeDefined()
+})
+
+test("a response is charged to the shells it launches, names, or was woken by", () => {
+  const ids = ['bq1', 'bq2', 'bq3']
+  const uses = [
+    { name: 'Read', input: { file_path: 'C:\T\tasks\bq2.output' } },
+    { name: 'Bash', input: { command: 'sleep 99', run_in_background: true } },
+    { name: 'Bash', input: { command: 'ls' } },
+  ]
+  expect(chargesOf(uses, ids, ['bq1'])).toEqual({ named: ['bq1', 'bq2'], launches: 1 })
+  expect(chargesOf([], ids, [])).toEqual({ named: [], launches: 0 })
+  expect(spentText({ tokensIn: 1_234_567, out: 4_100, usd: 0.834, steps: 3 })).toBe('Claude on it: $0.83 · 1.2M in · 4k out · 3 responses')
+})
+
+test("a shell's row carries what Claude spent on it, in a card while hovered", async ($, on) => {
+  const { clock } = world(on, () => ({}))
+  const kept = [['fff777', { title: 'Render a6', started: T0 - 120, expectS: 600, spent: { tokensIn: 50_000, out: 900, usd: 0.12, steps: 1 } }]]
+  on('state.get', ($, e, next) => (e.key === 'tasks' ? { value: { value: kept, version: 1 } } : next(e)) as never)
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts).toContain('Claude on it: $0.12 · 50k in · 900 out · 1 response')
+})

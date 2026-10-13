@@ -1,0 +1,4 @@
+__pycache__/
+# written by Claude Code when it hot-reloads the mod
+.claude-plugin/types/
+tsconfig.json
