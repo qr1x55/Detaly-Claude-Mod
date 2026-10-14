@@ -42,11 +42,11 @@ the three chats' engines together use ~5 % of one core.
 
 ![counted](docs/row-counted.png)
 
-**Timer.** The description names an end: a duration (`~15 min`, `1 h`, `90 s`) or a clock time (`at ~18:10`, `until 17:25`, `до 18:10`, cut from the title). A ring fills towards it, stripes run along the bar, one countdown; later `3 min over`. A clock time in the description wins over a percent in the output (often a part of the job's).
+**Timer.** The description names an end: a duration (`~15 min`, `1 h`, `90 s`) or a clock time (`at ~18:10`, `until 17:25`, `до 18:10`, cut from the title). A ring fills towards it, stripes run along the bar with *waiting* inside, one countdown; later `3 min over`. A clock time in the description wins over a percent in the output (often a part of the job's).
 
 ![timer](docs/row-timer.png)
 
-**No estimate.** A spinning ring, a segment sweeping the bar, a count up from the start.
+**No estimate.** A spinning ring, a segment sweeping the bar (*waiting · no estimate*), a count up from the start.
 
 ![no estimate](docs/row-spinner.png)
 

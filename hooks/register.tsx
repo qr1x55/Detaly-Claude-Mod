@@ -589,29 +589,29 @@ const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replac
 const svgCounted = (w: number, h: number, f: number, state: State, pct: string, counts: string) => {
   const fw = f > 0 ? Math.max(h, Math.round(f * w)) : 0
   const text = (color: string, soft: number) =>
-    `<text x="${w / 2}" y="${h / 2 + (h >= BAR_H ? 4.3 : 3.4)}" text-anchor="middle" fill="${color}" ` +
-    `font-family="'Segoe UI',system-ui,sans-serif" font-size="${h >= BAR_H ? 12 : 9.5}" ` +
-    `style="font-variant-numeric:tabular-nums"><tspan font-weight="700">${esc(pct)}</tspan>` +
-    (counts ? `<tspan dx="10" font-weight="600" fill-opacity="${soft}">${esc(counts)}</tspan>` : '') +
-    `</text>`
-  // each colour only where its ground is: the light numbers off the fill, the dark ones on it (drawn over each
-  // other, the light ones' anti-aliased edges ringed the dark ones in white)
+    barText(w, h, color, `<tspan font-weight="700">${esc(pct)}</tspan>` + (counts ? `<tspan dx="10" font-weight="600" fill-opacity="${soft}">${esc(counts)}</tspan>` : ''))
+  return bar(w, h, pill(w, h) + pill(fw, h, HEX[state]) + split(w, h, fw, text('#ececec', 0.65), text('#141414', 0.9)))
+}
+// text centred in a bar
+const barText = (w: number, h: number, color: string, spans: string) =>
+  `<text x="${w / 2}" y="${h / 2 + (h >= BAR_H ? 4.3 : 3.4)}" text-anchor="middle" fill="${color}" ` +
+  `font-family="'Segoe UI',system-ui,sans-serif" font-size="${h >= BAR_H ? 12 : 9.5}" style="font-variant-numeric:tabular-nums">${spans}</text>`
+// each colour only where its ground is: the light text off the fill (fw px), the dark one on it (drawn over each
+// other, the light one's anti-aliased edges ringed the dark one in white)
+const split = (w: number, h: number, fw: number, light: string, dark: string) => {
   const r = h / 2
   const fill = fw > 0 ? `M${r} 0H${fw - r}A${r} ${r} 0 0 1 ${fw - r} ${h}H${r}A${r} ${r} 0 0 1 ${r} 0Z` : ''
-  return bar(
-    w,
-    h,
+  return (
     `<defs><clipPath id="f"><path d="${fill}"/></clipPath>` +
-      `<clipPath id="t"><path clip-rule="evenodd" d="M0 0H${w}V${h}H0Z${fill}"/></clipPath></defs>` +
-      pill(w, h) +
-      pill(fw, h, HEX[state]) +
-      `<g clip-path="url(#t)">${text('#ececec', 0.65)}</g>` +
-      (fw > 0 ? `<g clip-path="url(#f)">${text('#141414', 0.9)}</g>` : ''),
+    `<clipPath id="t"><path clip-rule="evenodd" d="M0 0H${w}V${h}H0Z${fill}"/></clipPath></defs>` +
+    `<g clip-path="url(#t)">${light}</g>` +
+    (fw > 0 ? `<g clip-path="url(#f)">${dark}</g>` : '')
   )
 }
 
 // A timer's bar, animated so a wait does not look stalled (SMIL in a plain image: no frame to reload and flash):
-// filled to f with stripes running through it, or without f a soft segment sweeping the track.
+// filled to f with stripes running through it, or without f a soft segment sweeping the track; "waiting" inside, so
+// it does not read as work counted.
 const svgWait = (w: number, h: number, f: number | undefined) => {
   const c = HEX.run
   const body =
@@ -625,7 +625,10 @@ const svgWait = (w: number, h: number, f: number | undefined) => {
         pill(w, h) +
         pill(Math.max(h, Math.round(f * w)), h, c, ' fill-opacity="0.85"') +
         pill(Math.max(h, Math.round(f * w)), h, 'url(#s)')
-  return bar(w, h, `<clipPath id="r">${pill(w, h)}</clipPath><g clip-path="url(#r)">${body}</g>`)
+  const label = (color: string, soft: number) =>
+    barText(w, h, color, `<tspan font-weight="600" fill-opacity="${soft}">${f === undefined ? 'waiting · no estimate' : 'waiting'}</tspan>`)
+  const fw = f === undefined ? 0 : Math.max(h, Math.round(f * w))
+  return bar(w, h, `<clipPath id="r">${pill(w, h)}</clipPath><g clip-path="url(#r)">${body}</g>` + split(w, h, fw, label('#ececec', 0.7), label('#141414', 0.9)))
 }
 
 // A timer's ring: filled clockwise to f, or an arc spinning without f (SMIL).
