@@ -95,7 +95,7 @@ nothing in it keeps the band away until a job starts (or `/detaly`, which opens 
 
   ![a cut name, whole in a card](docs/demo/name.png)
 
-- **Hover a row** for a card above it with what Claude spent on the job: for a background task, the response that
+- **Hover a row's bar** for a card above it with what Claude spent on the job: for a background task, the response that
   launched it, the ones that read its output or named it, and every response of a turn its end woke; for a progress
   file job, the responses whose tool calls name its id (`walk14` in `walk14_train.log`). Split evenly when a response
   was about several; dollars as the session's cost moved, tokens in and out. A file job's card also has its start, run

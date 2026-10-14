@@ -748,11 +748,9 @@ export const register: Register = on => {
     const shown = active === 'all' ? tabs.filter(g => g.rows.length > 0) : tabs.filter(g => g.id === active)
     const all = shown.flatMap(g => g.rows)
     const shownSpent = all.find(r => r.spent)?.id
-    // A card shown for good, or revealed while hovered (the engine refuses a hover that reveals a card already shown):
-    // by its keyed Box, or by a hover group (`scope`) when it sits elsewhere. A card sits after what it covers: a Box
-    // drawn later paints over an earlier one, so a card among the rows had the rows under it show through.
-    const shownOr = (isShown: boolean, scope?: string) =>
-      isShown ? { display: 'flex' as const } : { display: 'none' as const, hover: { display: 'flex' as const, ...(scope ? { scope } : {}) } }
+    // A card shown for good, or revealed while its keyed Box is hovered (the engine refuses a hover that reveals a card
+    // already shown).
+    const shownOr = (isShown: boolean) => (isShown ? { display: 'flex' as const } : { display: 'none' as const, hover: { display: 'flex' as const } })
     let shownCut: string | undefined // set once the name column's width is known
     // A card the desktop lifts out of the band while its keyed Box is hovered (scope-less, hidden, placed): drawn in the
     // band it was cut at the band's edge (the band clips); lifted, it sits above the Box (under it without room there)
@@ -764,9 +762,6 @@ export const register: Register = on => {
     const Client = 'Client' in ui ? ui.Client : undefined // the pages' column, a surface module (desktop, terminal)
     // by the surface: the element table answers any name ('Svg' in it is true on the terminal too)
     const Svg = e.surface === 'desktop' || e.surface === 'mobile' ? $.ui.resolve(e).Svg : undefined
-    // What lights a hover group. A desktop makes no rule of a hover with no style, so a hover naming its group alone
-    // never lit it (the cards never showed): an invisible background gives it one.
-    const heat = (scope: string) => (Svg ? { scope, backgroundColor: '#00000000' } : { scope })
     // Columns: icon, name (under a fifth of the band; one line, the whole on hover), bar (the rest; a counted row's
     // numbers inside it), time (right-aligned, as wide as its longest text, 12 to 24). Every row is two lines tall, or one
     // when they overflow (below).
@@ -891,13 +886,19 @@ export const register: Register = on => {
             {icon(r)}
           </Box>
         </Box>
-        {/* hovered, the name lights its group: the whole name in a card at the row's end, over the row */}
-        <Box width={nameW} alignItems="center" hover={heat(`dn-${keyOf(g, r)}`)}>
+        {/* hovered, a cut name shows whole, and the bar the job's run and spend, in cards the desktop lifts above them
+            (the band clips what it draws) */}
+        <Box key={`n-${keyOf(g, r)}`} width={nameW} alignItems="center">
           <Text bold dimColor={r.state === 'done'} wrap="truncate-end">
             {r.title}
           </Text>
+          {isCut(r.title) && !(scene === 'name' && r.id === shownCut) ? (
+            <Box {...lifted}>
+              <Text bold>{r.title}</Text>
+            </Box>
+          ) : null}
         </Box>
-        <Box width={barW}>
+        <Box key={`b-${keyOf(g, r)}`} width={barW}>
           {g.isSelf && asking === r.id ? (
             <Box flexDirection="row" alignItems="center" gap={1}>
               <Text>Stop tracking this job? It keeps running.</Text>
@@ -911,25 +912,24 @@ export const register: Register = on => {
           ) : (
             middle(r)
           )}
+          {(r.spent || r.info) && !(g.isSelf && asking === r.id) && !(scene === 'spent' && r.id === shownSpent) ? (
+            <Box {...lifted}>
+              {[r.info, r.spent].filter(Boolean).map(l => <Text key={l}>{l}</Text>)}
+            </Box>
+          ) : null}
         </Box>
         <Box width={tailW} justifyContent="flex-end">
           <Text color={r.state === 'run' ? undefined : COLOR[r.state]} dimColor={r.state === 'run'} wrap="truncate-end">
             {r.tail}
           </Text>
         </Box>
-        {/* hovered, the row's run and spend in a card the desktop lifts above it (the band clips what it draws) */}
-        {(r.spent || r.info) && !(scene === 'spent' && r.id === shownSpent) ? (
-          <Box {...lifted}>
-            {[r.info, r.spent].filter(Boolean).map(l => <Text key={l}>{l}</Text>)}
-          </Box>
-        ) : null}
       </Box>
     )
-    // A row's cards: the whole name and what Claude spent, drawn last in the band at the row's place, so nothing drawn
-    // after paints over them; lit through the row's hover groups.
-    const rowCards = (g: Group, r: Row, top: number) => [
-      isCut(r.title) ? (
-        <Box position="absolute" top={top} left={ICON_W + 2} width={Math.ceil((1.25 * namePx(r.title)) / CELL_PX) + 2} paddingX={1} backgroundColor={CARD_BG} borderStyle="round" borderColor={CARD_EDGE} {...shownOr(scene === 'name' && r.id === shownCut, `dn-${keyOf(g, r)}`)}>
+    // A demo scene's card shown for good (the whole name, what Claude spent), drawn last in the band at the row's place,
+    // so nothing drawn after paints over it.
+    const rowCards = (r: Row, top: number) => [
+      isCut(r.title) && scene === 'name' && r.id === shownCut ? (
+        <Box position="absolute" top={top} left={ICON_W + 2} width={Math.ceil((1.25 * namePx(r.title)) / CELL_PX) + 2} paddingX={1} backgroundColor={CARD_BG} borderStyle="round" borderColor={CARD_EDGE}>
           <Text bold color={CARD_TEXT}>
             {r.title}
           </Text>
@@ -954,7 +954,7 @@ export const register: Register = on => {
     const cards: ReturnType<typeof rowCards> = []
     let rowTop = head
     for (const { g, r } of pages[page] ?? []) {
-      if (r) cards.push(...rowCards(g, r, rowTop))
+      if (r) cards.push(...rowCards(r, rowTop))
       rowTop += r ? rowH : 1
     }
     if (active === 'all' && all.length === 0)

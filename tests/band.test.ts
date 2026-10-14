@@ -106,7 +106,7 @@ test('own session and own project only; bar, percent, counts, ETA; stalled; stop
     const ui = await $.ui.mount({ ...BAND, surface })
     // the numbers: text on the terminal, inside the bar's picture (its alt) on the desktop
     const numbers = async () => [(await ui.find({ key: 'train5' }))?.text, ...(await ui.findAll({ type: 'Svg' })).map(svg => svg.props.alt)].join(' | ')
-    const rows = (await ui.findAll({ type: 'Box' })).filter(b => b.key !== undefined && !/-name$|^tab|^group-|^info$|^stat-/.test(b.key)).map(b => b.key)
+    const rows = (await ui.findAll({ type: 'Box' })).filter(b => b.key !== undefined && !/-name$|^tab|^group-|^info$|^stat-|^[nb]-/.test(b.key)).map(b => b.key)
     expect(rows).toEqual(['dl', 'manual', 'train5', 'cut'])
     expect((await ui.find({ key: 'cut' }))?.text).toContain('stopped')
     expect((await ui.find({ key: 'train5' }))?.text).toContain('train5')
@@ -327,7 +327,9 @@ test('a name is one line; one too long for its column shows whole in a card whil
   await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
   await clock.settle()
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  const cards = (await ui.findAll({ type: 'Box' })).filter(b => b.props.display === 'none' && b.props.position === 'absolute' && b.props.left === 5) // a name card: over the name cell
+  // a name card: hidden, lifted by the desktop out of the name's cell while it is hovered
+  const titles = ['short', 'Resize images ~6 min', long]
+  const cards = (await ui.findAll({ type: 'Box' })).filter(b => b.props.display === 'none' && b.props.position === 'absolute' && titles.includes(b.text ?? ''))
   expect(cards).toHaveLength(1) // the names that fit need none
   expect(cards[0]?.text).toBe(long)
 })
