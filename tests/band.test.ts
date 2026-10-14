@@ -542,15 +542,19 @@ test('/detaly opens the All tab, in a chat with no jobs of its own too', async (
   expect(await ui.find({ key: 's2:bg-r1' })).toBeDefined()
 })
 
-test("a response is charged to the shells it launches, names, or was woken by", () => {
+test("a response is charged to the shells it launches, names, or was woken by, and to the file jobs it names", () => {
   const ids = ['bq1', 'bq2', 'bq3']
   const uses = [
     { name: 'Read', input: { file_path: 'C:\T\tasks\bq2.output' } },
     { name: 'Bash', input: { command: 'sleep 99', run_in_background: true } },
     { name: 'Bash', input: { command: 'ls' } },
   ]
-  expect(chargesOf(uses, ids, ['bq1'])).toEqual({ named: ['bq1', 'bq2'], launches: 1 })
-  expect(chargesOf([], ids, [])).toEqual({ named: [], launches: 0 })
+  expect(chargesOf(uses, ids, ['bq1'])).toEqual({ named: ['bq1', 'bq2'], launches: 1, jobs: [] })
+  expect(chargesOf([], ids, [])).toEqual({ named: [], launches: 0, jobs: [] })
+  // a job by its id as a word: walk14's log, not walk14b's
+  const watch = [{ name: 'Bash', input: { command: 'python rl/watch.py D:/runs/walk14_train.log' } }]
+  const jobs = ['walk14@100', 'walk1@50', 'walk14b@200']
+  expect(chargesOf(watch, [], [], jobs).jobs).toEqual(['walk14@100'])
   expect(spentText({ tokensIn: 1_234_567, out: 4_100, usd: 0.834, steps: 3 })).toBe('Claude on it: $0.83 · 1.2M in · 4k out · 3 responses')
 })
 
@@ -587,6 +591,31 @@ test('a shell launched while its response still streams is charged that response
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
   expect(texts).toContain('Claude on it: $0.25 · 40k in · 300 out · 1 response')
+})
+
+test("a file job's card: its run, and what the responses that name it cost, published for the other chats", async ($, on) => {
+  const job = { title: 'walk14', done: 600, total: 3000, unit: 'it', started: T0 - 300, updated: T0, session: 's1' }
+  const { clock, stored } = world(on, () => ({ 'walk14.json': job }))
+  let usd = 2
+  on('session.usage', () => ({ value: { startedAt: T0 * 1000, context: { window: 1_000_000, percent: 3 }, rateLimits: [], cost: { usd } } }))
+  const input = { command: 'python rl/watch.py ../../results/rl/walk14_train.log' }
+  on('turn.step', async function* ($, e) {
+    yield { kind: 'text' as const, index: 0, text: 'Checking.' }
+    usd = 2.1
+    const usage = { input_tokens: 5, cache_read_input_tokens: 80_000, cache_creation_input_tokens: 0, output_tokens: 200, model: 'm' }
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [{ name: 'Bash', input }], stopReason: 'tool_use' as const, usage }
+  })
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  const step = $.turn.step({ turnId: 't1', index: 0, model: 'm', messageCount: 1 })
+  for await (const _ of step);
+  await step.result
+  await clock.advance(2000)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts).toContain(`Started ${hm(T0 - 300)} · running 5 min · 2.0 it/s`)
+  expect(texts).toContain('Claude on it: $0.10 · 80k in · 200 out · 1 response')
+  expect((stored[`chat:s1`] as { jobs?: object }).jobs).toEqual({ [`walk14@${T0 - 300}`]: 'Claude on it: $0.10 · 80k in · 200 out · 1 response' })
 })
 
 test("a chat silent for an hour leaves the shared store; one that ends takes its own entry out", async ($, on) => {

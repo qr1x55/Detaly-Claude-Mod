@@ -23,13 +23,15 @@ declare module 'claude-code' {
   interface PluginState {
     // tab: the band's open tab, "all" or a session's id ("" = this session); closed: tabs the person closed;
     // mini: the band minimized to this chat's rows, no tabs; tokens: the session's model responses summed since `since`
-    // (ms)
+    // (ms); jobSpent: what Claude's responses about this chat's file jobs cost, by "<id>@<started>" (those whose tool
+    // calls name the id)
     detaly: {
       tasks: [string, JobProgressTask][]
       tab: string
       closed: string[]
       mini: boolean
       tokens: { since: number; in: number; cacheRead: number; cacheWrite: number; out: number }
+      jobSpent: Record<string, Spent>
     }
   }
 }

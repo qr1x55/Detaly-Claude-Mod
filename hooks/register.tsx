@@ -23,8 +23,9 @@ type Job = {
 type Bg = JobProgressTask // a background shell of this session (types/index.d.ts)
 type State = 'run' | 'stale' | 'done' | 'fail' | 'stop' // stop: stopped on purpose, kept and dropped like done
 // isTimer: time, not counted work: a ring in place of the dot and a wait bar (filled to f, or sweeping without f)
-// `spent`: what Claude's responses about the job cost, shown while the row is hovered
-type Row = { id: string; title: string; f: number | undefined; counts: string; tail: string; state: State; isTimer?: boolean; spent?: string }
+// `spent`: what Claude's responses about the job cost; `info`: a file job's start, run time and rate; both in a card
+// while the row is hovered
+type Row = { id: string; title: string; f: number | undefined; counts: string; tail: string; state: State; isTimer?: boolean; spent?: string; info?: string }
 
 const TICK_MS = 2000
 const STALE_S = 60 // no update for this long: stalled
@@ -40,7 +41,8 @@ type Group = { id: string; label: string; rows: Row[]; isSelf?: boolean }
 // chat:<id>): rewritten when its rows change and every PUBLISH_S, so an entry gone quiet past ALIVE_S is a closed chat,
 // and past FORGET_S it is deleted (by whichever chat sees it), as a chat's own is when it ends. sync:<id> holds the
 // last ⟳ Sync another chat asked of it. Files could not be deleted ($.fs has no delete), so they piled up.
-type Published = { session: string; label: string; updated: number; rows: Row[] }
+// `jobs`: what Claude spent on its file jobs (by "<id>@<started>"), which the other chats read from the files themselves
+type Published = { session: string; label: string; updated: number; rows: Row[]; jobs?: Record<string, string> }
 const PUBLISH_S = 10
 const ALIVE_S = 60
 const FORGET_S = 3600
@@ -172,14 +174,21 @@ const plus = (a: Spent | undefined, b: Spent): Spent => ({
   steps: (a?.steps ?? 0) + b.steps,
 })
 const share = (s: Spent, n: number): Spent => ({ tokensIn: s.tokensIn / n, out: s.out / n, usd: s.usd / n, steps: s.steps / n })
-// the shells a response is about: the turn's and the ones its tool calls name; and how many it launches
-export function chargesOf(uses: readonly { name: string; input: unknown }[], ids: Iterable<string>, turn: readonly string[]) {
+// the shells a response is about: the turn's and the ones its tool calls name; and how many it launches. `jobs`: this
+// chat's file jobs ("<id>@<started>"), about which a response is when its calls name the id as a word ("walk14" in
+// walk14_train.log, not in walk14b)
+export function chargesOf(uses: readonly { name: string; input: unknown }[], ids: Iterable<string>, turn: readonly string[], jobs: Iterable<string> = []) {
   const named = new Set(turn)
   const text = uses.map(u => JSON.stringify(u.input ?? ''))
   for (const id of ids) if (text.some(x => x.includes(id))) named.add(id)
   const isBg = (u: { name: string; input: unknown }) =>
     /^(Bash|PowerShell)$/.test(u.name) && (u.input as { run_in_background?: unknown } | null)?.run_in_background === true
-  return { named: [...named], launches: uses.filter(isBg).length }
+  const isWord = (id: string) => {
+    const re = new RegExp(`(?<![A-Za-z0-9])${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9])`)
+    return text.some(x => re.test(x))
+  }
+  const namedJobs = [...jobs].filter(k => isWord(k.slice(0, k.lastIndexOf('@'))))
+  return { named: [...named], launches: uses.filter(isBg).length, jobs: namedJobs }
 }
 export const spentText = (s: Spent) => {
   const n = Math.round(s.steps)
@@ -248,6 +257,10 @@ export function rowOf(id: string, j: Job, now: number): Row | undefined {
     }
     if (eta !== undefined) tail = leftAt(updated, eta)
   }
+  // "Started 10:42 · running 1 h 12 min · 4.1 it/s": the rate is the run's average
+  const ran = (state === 'run' || state === 'stale' ? now : updated) - (j.started ?? now)
+  const rate = ran > 0 && done > 0 ? ` · ${perTime(done / ran, j.unit)}` : ''
+  const info = j.started ? `Started ${clockAt(now, j.started - now)} · ${state === 'run' || state === 'stale' ? 'running' : 'ran'} ${dur(ran)}${rate}` : undefined
   return {
     id,
     title: j.title ?? id,
@@ -255,7 +268,13 @@ export function rowOf(id: string, j: Job, now: number): Row | undefined {
     counts: total > 0 ? `${num(done)} / ${num(total)}${unit}` : `${num(done)}${unit}`,
     tail,
     state,
+    info,
   }
+}
+// "4.1 it/s", "16 it/min", "2.5/h"
+const perTime = (perS: number, unit?: string) => {
+  const [x, per] = perS >= 1 ? [perS, 's'] : perS * 60 >= 1 ? [perS * 60, 'min'] : [perS * 3600, 'h']
+  return `${x >= 10 ? Math.round(x) : x.toFixed(1)}${unit ? ` ${unit}` : ''}/${per}`
 }
 
 const tabAtom = atom({ plugin: 'detaly', key: 'tab' } as const, '')
@@ -365,10 +384,16 @@ async function tick($: EngineInterface, dir: string, root: string) {
     else if (row === undefined) bg.delete(id)
   }
   if (isChanged) await save($)
+  // what Claude spent on this chat's file jobs; a job no longer listed is forgotten
+  ownJobs = files.filter(f => isMine(f.job, selfId, root)).map(f => `${f.id}@${f.job.started}`)
+  const jobSpent = await read($, jobSpentAtom)
+  if (Object.keys(jobSpent).some(k => !listed.has(k.slice(0, k.lastIndexOf('@')))))
+    await update($, jobSpentAtom, m => Object.fromEntries(Object.entries(m).filter(([k]) => listed.has(k.slice(0, k.lastIndexOf('@'))))))
+  const jobs = Object.fromEntries(ownJobs.flatMap(k => (jobSpent[k] ? [[k, spentText(jobSpent[k])]] : [])))
   // published for the other sessions' All tab: when it changes, and as a heartbeat
-  const text = JSON.stringify(own)
+  const text = JSON.stringify([own, jobs])
   if (text !== published || now - publishedAt > PUBLISH_S) {
-    const pub: Published = { session: selfId, label, updated: now, rows: own }
+    const pub: Published = { session: selfId, label, updated: now, rows: own, jobs }
     await $.store.set(`chat:${selfId}`, pub).catch(() => {})
     published = text
     publishedAt = now
@@ -414,8 +439,12 @@ async function tick($: EngineInterface, dir: string, root: string) {
     }
     byId.set(sid, { id: sid, label: p.label, rows: p.rows.filter(r => !gone.has(`${sid}:${r.id}`)) })
   }
-  for (const { id, job, row } of files) {
+  // a file job's spend: this chat's own, or what the chat that launched it publishes
+  const theirs = Object.assign({}, ...chats.map(([, p]) => p.jobs ?? {})) as Record<string, string>
+  for (const { id, job, row: bare } of files) {
     if (demo && !id.startsWith('demo-')) continue
+    const spent = jobs[`${id}@${job.started}`] ?? theirs[`${id}@${job.started}`]
+    const row = spent ? { ...bare, spent } : bare
     if (isMine(job, selfId, root)) {
       self.rows.push(row)
       continue
@@ -473,6 +502,8 @@ const LEVEL = [
 ] as const
 const levelOf = (pct: number) => LEVEL.find(([from]) => pct >= from) ?? LEVEL[2]
 const tokensAtom = atom({ plugin: 'detaly', key: 'tokens' } as const, { since: 0, in: 0, cacheRead: 0, cacheWrite: 0, out: 0 })
+const jobSpentAtom = atom({ plugin: 'detaly', key: 'jobSpent' } as const, {} as Record<string, Spent>)
+let ownJobs: string[] = [] // this chat's file jobs, "<id>@<started>", as the last tick listed them
 const big = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : `${n}`)
 const LIMIT = { five_hour: ['5h', '5-hour limit'], seven_day: ['week', 'Weekly limit'], spend_limit: ['spend', 'Spend limit'] } as const
 type Stat = { text: string; f?: number }
@@ -723,6 +754,10 @@ export const register: Register = on => {
     const shownOr = (isShown: boolean, scope?: string) =>
       isShown ? { display: 'flex' as const } : { display: 'none' as const, hover: { display: 'flex' as const, ...(scope ? { scope } : {}) } }
     let shownCut: string | undefined // set once the name column's width is known
+    // A card the desktop lifts out of the band while its keyed Box is hovered (scope-less, hidden, placed): drawn in the
+    // band it was cut at the band's edge (the band clips); lifted, it sits above the Box (under it without room there)
+    // in the desktop's own card, theme colours, its place and box props dropped. A terminal draws it in place.
+    const lifted = { position: 'absolute' as const, top: 1, left: 0, flexDirection: 'column' as const, paddingX: 1, borderStyle: 'round', ...shownOr(false) }
 
     const { Box, Text, Button } = $.ui.resolve(e)
     const ui = $.ui.resolve(e)
@@ -837,7 +872,7 @@ export const register: Register = on => {
     // this chat's rows keep their own ids as keys; another chat's are prefixed with it
     const keyOf = (g: Group, r: Row) => (g.isSelf ? r.id : `${g.id}:${r.id}`)
     const rowView = (g: Group, r: Row) => (
-      <Box key={keyOf(g, r)} flexDirection="row" alignItems="center" gap={2} height={rowH} {...(r.spent ? { hover: heat(`ds-${keyOf(g, r)}`) } : {})}>
+      <Box key={keyOf(g, r)} flexDirection="row" alignItems="center" gap={2} height={rowH}>
         {/* hovered (the row's Box is the scope), a ✖ takes the icon's place: the cell clips, and the hidden ✖
             before the icon, as wide as the cell, is revealed and pushes the icon out past the edge. This chat's
             finished row leaves at once, its running one after "stop tracking?"; another chat's is hidden here. */}
@@ -882,6 +917,12 @@ export const register: Register = on => {
             {r.tail}
           </Text>
         </Box>
+        {/* hovered, the row's run and spend in a card the desktop lifts above it (the band clips what it draws) */}
+        {(r.spent || r.info) && !(scene === 'spent' && r.id === shownSpent) ? (
+          <Box {...lifted}>
+            {[r.info, r.spent].filter(Boolean).map(l => <Text key={l}>{l}</Text>)}
+          </Box>
+        ) : null}
       </Box>
     )
     // A row's cards: the whole name and what Claude spent, drawn last in the band at the row's place, so nothing drawn
@@ -894,8 +935,8 @@ export const register: Register = on => {
           </Text>
         </Box>
       ) : null,
-      r.spent ? (
-        <Box position="absolute" top={top} right={hasMore ? 3 : 0} width={r.spent.length + 2} paddingX={1} backgroundColor={CARD_BG} borderStyle="round" borderColor={CARD_EDGE} {...shownOr(scene === 'spent' && r.id === shownSpent, `ds-${keyOf(g, r)}`)}>
+      r.spent && scene === 'spent' && r.id === shownSpent ? (
+        <Box position="absolute" top={top} right={hasMore ? 3 : 0} width={r.spent.length + 2} paddingX={1} backgroundColor={CARD_BG} borderStyle="round" borderColor={CARD_EDGE}>
           <Text color={CARD_TEXT}>{r.spent}</Text>
         </Box>
       ) : null,
@@ -951,11 +992,8 @@ export const register: Register = on => {
         })}
       </Box>
     )
-    // A card the desktop lifts out of the band while its keyed Box is hovered (scope-less, hidden, placed): drawn in the
-    // band it was cut at the band's edge (the band clips), lifted it sits above the Box, or under it without room there.
-    const lifted = { position: 'absolute' as const, top: 1, left: 0, flexDirection: 'column' as const, paddingX: 1, backgroundColor: CARD_BG, borderStyle: 'round', borderColor: CARD_EDGE, ...shownOr(false) }
-    const details = stats.card.map(l => (
-      <Text key={l} color={CARD_TEXT}>
+    const details = (color?: string) => stats.card.map(l => (
+      <Text key={l} color={color}>
         {l}
       </Text>
     ))
@@ -966,7 +1004,7 @@ export const register: Register = on => {
           <Box flexDirection="row" alignItems="center" height={1} gap={2}>
             <Box key="stat-figures" flexGrow={1} flexShrink={1}>
               {figures}
-              {details.length ? <Box {...lifted}>{details}</Box> : null}
+              {stats.card.length ? <Box {...lifted}>{details()}</Box> : null}
             </Box>
             <Button key="sync-mini" plain label="⟳ Sync" onPress={() => syncTab($, selfId)} />
             <Button key="expand" plain label="▴ Tabs" onPress={() => update($, miniAtom, () => false)} />
@@ -1022,7 +1060,7 @@ export const register: Register = on => {
               {isInfoPinned || scene === 'info' ? null : (
                 <Box {...lifted}>
                   {figures}
-                  {details}
+                  {details()}
                 </Box>
               )}
             </Box>
@@ -1035,7 +1073,7 @@ export const register: Register = on => {
         {isInfoPinned || scene === 'info' ? (
           <Box position="absolute" top={1} right={0} display="flex" flexDirection="column" paddingX={1} backgroundColor={CARD_BG} borderStyle="round" borderColor={CARD_EDGE}>
             {figures}
-            {details}
+            {details(CARD_TEXT)}
           </Box>
         ) : null}
       </Box>
@@ -1085,8 +1123,11 @@ export const register: Register = on => {
         usd: before !== undefined && after !== undefined ? Math.max(0, after - before) : 0,
         steps: 1,
       }
-      const { named, launches } = chargesOf(r.toolUses, bg.keys(), turnOf)
-      const each = named.length + launches ? share(s, named.length + launches) : undefined
+      const { named, launches, jobs } = chargesOf(r.toolUses, bg.keys(), turnOf, ownJobs)
+      const n = named.length + launches + jobs.length
+      const each = n ? share(s, n) : undefined
+      if (each && jobs.length)
+        await update($, jobSpentAtom, m => ({ ...m, ...Object.fromEntries(jobs.map(k => [k, plus(m[k], each)])) }))
       launchShare = launches ? each : undefined
       for (const id of [...named, ...mine]) {
         const t = bg.get(id)
