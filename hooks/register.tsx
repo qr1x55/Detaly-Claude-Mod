@@ -729,6 +729,9 @@ export const register: Register = on => {
     const Client = 'Client' in ui ? ui.Client : undefined // the pages' column, a surface module (desktop, terminal)
     // by the surface: the element table answers any name ('Svg' in it is true on the terminal too)
     const Svg = e.surface === 'desktop' || e.surface === 'mobile' ? $.ui.resolve(e).Svg : undefined
+    // What lights a hover group. A desktop makes no rule of a hover with no style, so a hover naming its group alone
+    // never lit it (the cards never showed): an invisible background gives it one.
+    const heat = (scope: string) => (Svg ? { scope, backgroundColor: '#00000000' } : { scope })
     // Columns: icon, name (under a fifth of the band; one line, the whole on hover), bar (the rest; a counted row's
     // numbers inside it), time (right-aligned, as wide as its longest text, 12 to 24). Every row is two lines tall, or one
     // when they overflow (below).
@@ -834,7 +837,7 @@ export const register: Register = on => {
     // this chat's rows keep their own ids as keys; another chat's are prefixed with it
     const keyOf = (g: Group, r: Row) => (g.isSelf ? r.id : `${g.id}:${r.id}`)
     const rowView = (g: Group, r: Row) => (
-      <Box key={keyOf(g, r)} flexDirection="row" alignItems="center" gap={2} height={rowH} {...(r.spent ? { hover: { scope: `ds-${keyOf(g, r)}` } } : {})}>
+      <Box key={keyOf(g, r)} flexDirection="row" alignItems="center" gap={2} height={rowH} {...(r.spent ? { hover: heat(`ds-${keyOf(g, r)}`) } : {})}>
         {/* hovered (the row's Box is the scope), a ✖ takes the icon's place: the cell clips, and the hidden ✖
             before the icon, as wide as the cell, is revealed and pushes the icon out past the edge. This chat's
             finished row leaves at once, its running one after "stop tracking?"; another chat's is hidden here. */}
@@ -854,7 +857,7 @@ export const register: Register = on => {
           </Box>
         </Box>
         {/* hovered, the name lights its group: the whole name in a card at the row's end, over the row */}
-        <Box width={nameW} alignItems="center" hover={{ scope: `dn-${keyOf(g, r)}` }}>
+        <Box width={nameW} alignItems="center" hover={heat(`dn-${keyOf(g, r)}`)}>
           <Text bold dimColor={r.state === 'done'} wrap="truncate-end">
             {r.title}
           </Text>
@@ -882,8 +885,7 @@ export const register: Register = on => {
       </Box>
     )
     // A row's cards: the whole name and what Claude spent, drawn last in the band at the row's place, so nothing drawn
-    // after paints over them; lit through the row's hover groups. No key: a keyed Box lights by the pointer on itself
-    // (hidden, never), not by its group.
+    // after paints over them; lit through the row's hover groups.
     const rowCards = (g: Group, r: Row, top: number) => [
       isCut(r.title) ? (
         <Box position="absolute" top={top} left={ICON_W + 2} width={Math.ceil((1.25 * namePx(r.title)) / CELL_PX) + 2} paddingX={1} backgroundColor={CARD_BG} borderStyle="round" borderColor={CARD_EDGE} {...shownOr(scene === 'name' && r.id === shownCut, `dn-${keyOf(g, r)}`)}>
@@ -959,7 +961,7 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column">
           <Box flexDirection="row" alignItems="center" height={1} gap={2}>
-            <Box flexGrow={1} flexShrink={1} hover={{ scope: 'detaly-stats' }}>
+            <Box flexGrow={1} flexShrink={1} hover={heat('detaly-stats')}>
               {figures}
             </Box>
             <Button key="sync-mini" plain label="⟳ Sync" onPress={() => syncTab($, selfId)} />
@@ -1008,7 +1010,7 @@ export const register: Register = on => {
             {others.map(g => tab(g.id, short(g.label), running(g), true))}
             <Box flexGrow={1} />
             {/* ⓘ Info: the minimized row's figures and details in a card, while hovered or once pressed */}
-            <Box flexDirection="row" hover={{ scope: 'detaly-info' }}>
+            <Box flexDirection="row" hover={heat('detaly-info')}>
               <Button
                 key="info-btn"
                 plain
