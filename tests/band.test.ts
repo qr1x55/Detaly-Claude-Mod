@@ -288,7 +288,7 @@ test('background shells outlive a reload of the mod: they are kept in the sessio
   expect(writes.at(-1)).toEqual([['fff666', expect.objectContaining({ endedAt: T0, status: 'completed' })]])
 })
 
-test('a quick task never shows; a finished one stays as long as it ran (15 s to 5 min)', async ($, on) => {
+test('a quick task never shows; a finished one stays as long as it ran (15 s to 10 min)', async ($, on) => {
   const { clock } = world(on, () => ({}))
   let n = 0
   on('tool.call', () => {
@@ -315,6 +315,34 @@ test('a quick task never shows; a finished one stays as long as it ran (15 s to 
   expect((await ui.find({ key: 'bg-q2' }))?.text).toContain('done in 1:00')
   await clock.advance(12_000)
   expect(await ui.find({ key: 'bg-q2' })).toBeUndefined() // ran 60 s: gone 60 s after its end
+})
+
+test("a finished row's time runs while the person is at Claude: away, it waits for them", async ($, on) => {
+  const { clock, stored } = world(on, () => ({}))
+  on('tool.call', () => ({ result: {} as never, text: 'Command running in background with ID: w1. Output is being written to: C:\\T\\tasks\\w1.output' }))
+  // another chat's watcher keeps the presence clock; here its value is set by hand, kept fresh
+  let activeS = 0
+  const step = async (ms: number) => {
+    for (let t = 0; t < ms; t += 10_000) {
+      stored.presence = { activeS, at: clock.now() / 1000, by: 's2' }
+      await clock.advance(10_000)
+    }
+  }
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  await $.tool.call({ tool: 'Bash', command: 'python train.py', description: 'Train walk20', run_in_background: true })
+  await step(900_000) // ran 15 min: stays 10 min of the person's time
+  await $.session.append({
+    message: { type: 'user', content: [{ type: 'text', text: '<task-notification><task-id>w1</task-id><status>completed</status></task-notification>' }] },
+  } as never)
+  await step(1_800_000) // half an hour away: the clock stands
+  expect((await ui.find({ key: 'bg-w1' }))?.text).toContain('done in 15:00')
+  activeS = 590 // back, nearly 10 min at Claude
+  await step(20_000)
+  expect(await ui.find({ key: 'bg-w1' })).toBeDefined()
+  activeS = 610
+  await step(20_000)
+  expect(await ui.find({ key: 'bg-w1' })).toBeUndefined()
 })
 
 test('a name is one line; one too long for its column shows whole in a card while hovered', async ($, on) => {

@@ -65,6 +65,10 @@ the three chats' engines together use ~5 % of one core.
 **Stopped.** Grey ■ `stopped after 12:04`: a task Claude stopped (TaskStop), or a job whose log `progress_tail.ps1`
 sees no process writing any more. It leaves like a done row.
 
+A done, failed or stopped row stays as long as the job ran, at least 15 s and at most 10 minutes, and that time runs
+only while you are at Claude: its window in front and the keyboard or mouse touched in the last minute. A job that
+ends while you are away waits for you. (Windows; elsewhere the minutes are plain wall-clock time.)
+
 The timer and spinner rows animate; the bars do not jitter: a timer's text changes once a minute.
 
 ## The band
@@ -145,8 +149,14 @@ On the tab row, **ⓘ Info** (left of Minimize) shows the same figures and detai
 - `~/.claude/progress/<id>.json`: progress files that jobs outside Claude write (below). The helpers remove the ones
   nobody has written for a week when they start; the mod itself cannot delete files. A `sessions/` folder there is
   left from versions before 0.1.0: delete it.
+- The same store also holds the **presence clock** (`presence`: how many seconds you have spent at Claude, never
+  what you did) and, per finished progress-file job, where that clock stood when it ended (`done:<id>@<start>`, removed
+  with the file).
 - The session's state (Claude Code's own store for mods): the chat's background tasks, the open tab, minimized or
   not, and the token counts.
+- **One small PowerShell process** (Windows), started by one of the open chats: every 10 s it asks Windows how long
+  ago the keyboard or mouse was touched and which app's window is in front, for the presence clock. About 70 MB of
+  memory and 30 ms of CPU a minute (measured); it ends with that chat, and another open chat starts its own.
 
 ## Install
 

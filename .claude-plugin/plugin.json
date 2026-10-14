@@ -1,6 +1,6 @@
 {
   "name": "detaly",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "description": "Detaly: live progress bars above the prompt for long jobs (the chat's background shells and any job that writes ~/.claude/progress/<id>.json), every chat's jobs in tabs, session figures (context, rate limits, tokens, cost)",
   "author": { "name": "qr1x55" },
   "license": "MIT",
