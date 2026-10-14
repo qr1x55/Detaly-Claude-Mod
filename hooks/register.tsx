@@ -24,13 +24,13 @@ type Bg = JobProgressTask // a background shell of this session (types/index.d.t
 type State = 'run' | 'stale' | 'done' | 'fail' | 'stop' // stop: stopped on purpose, kept and dropped like done
 // isTimer: time, not counted work: a ring in place of the dot and a wait bar (filled to f, or sweeping without f)
 // `spent`: what Claude's responses about the job cost; `info`: a file job's start, run time and rate; both in a card
-// while the row is hovered
-type Row = { id: string; title: string; f: number | undefined; counts: string; tail: string; state: State; isTimer?: boolean; spent?: string; info?: string }
+// while the row is hovered. `seen`: a finished row's key in the store's `seen:` entries
+type Row = { id: string; title: string; f: number | undefined; counts: string; tail: string; state: State; isTimer?: boolean; spent?: string; info?: string; seen?: string }
 
 const TICK_MS = 2000
 const STALE_S = 60 // no update for this long: stalled
-// A finished row stays as long as the job ran, 15 s to KEEP_FINISHED_S, counted on the presence clock: while the
-// person is at Claude, so a row that ends while they are away waits for them.
+// A finished row stays as long as the job ran, 15 s to KEEP_FINISHED_S, counted on the presence clock from when the
+// person first saw it: drawn on the band's open page while they were at Claude. Unseen, it waits for them.
 const KEEP_FINISHED_S = 600
 const KEEP_ENDED_S = 12 * 3600 // a finished file job's file is read this long at most, waiting for the person
 const SHOW_AFTER_S = 10 // a background task shows once it has run this long
@@ -43,7 +43,7 @@ type Group = { id: string; label: string; rows: Row[]; isSelf?: boolean }
 // What a session's mod publishes for the others, in the store every session on the machine shares ($.store, key
 // chat:<id>): rewritten when its rows change and every PUBLISH_S, so an entry gone quiet past ALIVE_S is a closed chat,
 // and past FORGET_S it is deleted (by whichever chat sees it), as a chat's own is when it ends. sync:<id> holds the
-// last ⟳ Sync another chat asked of it. Files could not be deleted ($.fs has no delete), so they piled up.
+// last sync another chat's ⟳ Refresh asked of it. Files could not be deleted ($.fs has no delete), so they piled up.
 // `jobs`: what Claude spent on its file jobs (by "<id>@<started>"), which the other chats read from the files themselves
 type Published = { session: string; label: string; updated: number; rows: Row[]; jobs?: Record<string, string> }
 const PUBLISH_S = 10
@@ -62,7 +62,8 @@ let progressDir = '' // ~/.claude/progress
 let syncSeen: number | undefined // when the last sync request another chat left for this one was made (undefined: not listed yet)
 let folder = '' // this session's project folder
 const lastGood = new Map<string, { mtime: number; v: Job }>() // read again only when the file moved
-const endsSeen = new Map<string, number>() // a finished file job's end on the presence clock, by "<id>@<started>"
+const seenAt = new Map<string, number>() // the presence clock when a finished row was first seen, by its `seen` key
+const marked = new Set<string>() // the rows this chat has marked seen
 // a task's output, read whole (no partial reads): its last line (all the progress lives in), its size then, when
 const lastLine = new Map<string, { size: number; at: number; line: string }>()
 const BIG_OUTPUT = 64 << 10 // a growing output past this is read again every BIG_EVERY_S at most
@@ -203,12 +204,14 @@ export const spentText = (s: Spent) => {
 // chat's watcher, a PowerShell child asking Windows every PRESENCE_EVERY_S, and kept in the store every chat shares
 // (`presence`), so all of them read one clock; a chat that finds it stale starts its own watcher. undefined (another
 // OS, no watcher yet): rows go by the wall clock.
-type Presence = { activeS: number; at: number; by: string }
+type Presence = { activeS: number; at: number; by: string; here: boolean }
 const PRESENCE_EVERY_S = 10
 const PRESENCE_STALE_S = 30
 const IDLE_S = 60
 let activeNow: number | undefined
+let isHere = false // the person at Claude at the last sample
 let isWindows = false
+let watchFailed = false // no sample ever came: the wall clock serves
 let watchTried = 0
 const PRESENCE_PS =
   `Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class DetalyIdle { ` +
@@ -223,6 +226,7 @@ const PRESENCE_PS =
 // ponytail: a watcher that yields to another breaks its loop and leaves its child to the runtime; should it run on,
 // it is an idle PowerShell (~70 MB) until the chat ends.
 async function watch($: EngineInterface) {
+  let samples = 0
   try {
     let rest = ''
     const argv = ['powershell', '-NoProfile', '-NonInteractive', '-Command', '-']
@@ -232,28 +236,55 @@ async function watch($: EngineInterface) {
       rest = lines.pop() ?? ''
       const m = lines.map(l => /^(\d+) (\S*)/.exec(l.trim())).filter(x => x !== null).pop()
       if (!m) continue
+      samples += 1
       const now = (await $.clock.now()) / 1000
       const p = (await $.store.get('presence').catch(() => undefined)) as Presence | undefined
       if (p && p.by !== selfId && now - p.at < PRESENCE_STALE_S) break
-      const isHere = Number(m[1]) < IDLE_S && /^claude$/i.test(m[2] ?? '')
+      const here = Number(m[1]) < IDLE_S && /^claude$/i.test(m[2] ?? '')
       const dt = p ? Math.max(0, Math.min(now - p.at, 2 * PRESENCE_EVERY_S)) : 0
-      await $.store.set('presence', { activeS: (p?.activeS ?? 0) + (isHere ? dt : 0), at: now, by: selfId }).catch(() => {})
+      await $.store.set('presence', { activeS: (p?.activeS ?? 0) + (here ? dt : 0), at: now, by: selfId, here }).catch(() => {})
     }
   } catch {
-    // no PowerShell, or it failed: the wall clock serves
+    // no PowerShell, or it failed
   }
+  if (!samples) watchFailed = true
 }
-// whether a row that ended at `endedAt` (wall s; `endActive` on the presence clock) after `ran` s still stays
-const isKept = (now: number, endedAt: number, endActive: number | undefined, ran: number) => {
+// whether a row that ended at `endedAt` (wall s) after `ran` s, first seen at `seen` on the presence clock, still
+// stays: unseen, for good while a presence clock can run (one between watchers too), else by the wall clock
+const isKept = (now: number, endedAt: number, seen: number | undefined, ran: number) => {
   const keep = Math.min(KEEP_FINISHED_S, Math.max(15, ran))
-  return activeNow !== undefined && endActive !== undefined ? activeNow - endActive <= keep : now - endedAt <= keep
+  if (isWindows && !watchFailed) return seen === undefined || activeNow === undefined || activeNow - seen <= keep
+  return now - endedAt <= keep
+}
+
+// A finished row's mark in the store (seen:<key> = { active, at }), read until it is there.
+let sweptAt = 0 // when the store's marks were last swept
+async function seenOf($: EngineInterface, key: string) {
+  if (seenAt.has(key)) return
+  const v = (await $.store.get(`seen:${key}`).catch(() => undefined)) as { active: number; at: number } | undefined
+  if (v) seenAt.set(key, v.active)
+}
+async function forget($: EngineInterface, key: string) {
+  seenAt.delete(key)
+  marked.delete(key)
+  await $.store.delete(`seen:${key}`).catch(() => {})
+}
+// The finished rows on the band's open page, drawn while the person is at Claude: seen, unless a chat saw them first.
+async function markSeen($: EngineInterface, rows: (Row | undefined)[], nowS: number) {
+  if (!isHere || activeNow === undefined || demo) return
+  for (const r of rows) {
+    if (!r?.seen || marked.has(r.seen)) continue
+    marked.add(r.seen)
+    if ((await $.store.get(`seen:${r.seen}`).catch(() => undefined)) === undefined)
+      await $.store.set(`seen:${r.seen}`, { active: activeNow, at: nowS }).catch(() => {})
+  }
 }
 
 // The row of a background task; undefined: drop the task, null: not yet shown
 export function bgRowOf(id: string, t: Bg, now: number, output?: string): Row | null | undefined {
   const el = (t.endedAt ?? now) - t.started
   // a quick task never shows; a finished one stays as long as it ran, 15 s to 10 min of the person's time
-  if (t.endedAt !== undefined && (el < SHOW_AFTER_S || !isKept(now, t.endedAt, t.endActive, el))) return undefined
+  if (t.endedAt !== undefined && (el < SHOW_AFTER_S || !isKept(now, t.endedAt, seenAt.get(`bg-${id}`), el))) return undefined
   if (el < SHOW_AFTER_S && !t.isLate) return null
   const shown = `${t.isLate ? '≥ ' : ''}${clock(el)}`
   if (t.endedAt !== undefined) {
@@ -261,7 +292,7 @@ export function bgRowOf(id: string, t: Bg, now: number, output?: string): Row | 
     const isStop = t.status === 'stopped' || t.status === 'killed'
     const tail = `${isOk ? 'done in' : `${isStop ? 'stopped' : t.status} after`} ${shown}`
     const state = isOk ? 'done' : isStop ? 'stop' : 'fail'
-    return { id: `bg-${id}`, title: t.title, f: isOk ? 1 : undefined, counts: '', tail, state, isTimer: !t.isCounted }
+    return { id: `bg-${id}`, title: t.title, f: isOk ? 1 : undefined, counts: '', tail, state, isTimer: !t.isCounted, seen: `bg-${id}` }
   }
   // an end in the description ("until ~21:35") is the clock to trust; a percent in the output may be a part of the job
   const p = output === undefined || t.isUntil ? undefined : progressOf(output)
@@ -286,11 +317,11 @@ const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCas
 export const isMine = (j: Job, session: string, root: string) =>
   j.session ? j.session === session : j.project ? (norm(j.project) + '/').startsWith(norm(root) + '/') : true
 
-// `endActive`: the presence clock when its end was first seen
-export function rowOf(id: string, j: Job, now: number, endActive?: number): Row | undefined {
+export function rowOf(id: string, j: Job, now: number): Row | undefined {
   const updated = j.updated ?? now
   const age = now - updated
-  if ((j.finished || j.stopped) && !isKept(now, updated, endActive, updated - (j.started ?? updated))) return undefined
+  const seen = j.finished || j.stopped ? `${id}@${j.started}` : undefined
+  if (seen && !isKept(now, updated, seenAt.get(seen), updated - (j.started ?? updated))) return undefined
   const done = j.done ?? 0
   const total = j.total ?? 0
   const unit = j.unit ? ` ${j.unit}` : ''
@@ -324,6 +355,7 @@ export function rowOf(id: string, j: Job, now: number, endActive?: number): Row 
     tail,
     state,
     info,
+    ...(seen ? { seen } : {}),
   }
 }
 // "4.1 it/s", "16 it/min", "2.5/h"
@@ -370,7 +402,7 @@ async function syncSelf($: EngineInterface) {
   await save($)
 }
 
-// A tab's ⟳ Sync. This chat: its own sync. Another chat: what was hidden here comes back, and that chat is asked to sync
+// A tab's sync. This chat: its own sync. Another chat: what was hidden here comes back, and that chat is asked to sync
 // itself (a request file its mod reads on its next tick). All: both, for every chat, and closed tabs come back.
 async function syncTab($: EngineInterface, id: string) {
   if (id === 'all' || id === selfId) await syncSelf($)
@@ -383,8 +415,9 @@ async function syncTab($: EngineInterface, id: string) {
   await runNow?.()
 }
 
-// A tab's Clear: its finished rows leave (this chat's for good, another chat's here).
-function clearTab($: EngineInterface, id: string) {
+// A tab's ⟳ Refresh: its sync, then its finished rows leave (this chat's for good, another chat's here).
+async function refreshTab($: EngineInterface, id: string) {
+  await syncTab($, id)
   for (const g of groups) if (id === 'all' || g.id === id) for (const r of g.rows) if (isOver(r)) dismiss($, g.id, r.id)
 }
 
@@ -403,6 +436,9 @@ async function tick($: EngineInterface, dir: string, root: string) {
   // the presence clock, and a watcher of this chat's when none is live
   const pr = (await $.store.get('presence').catch(() => undefined)) as Presence | undefined
   activeNow = pr && now - pr.at < PRESENCE_STALE_S ? pr.activeS : undefined
+  const wasHere = isHere
+  isHere = activeNow !== undefined && pr?.here === true
+  if (isHere && !wasHere) $.ui.invalidate('ui.render') // back at Claude: what the band shows now is seen
   if (activeNow === undefined && isWindows && !demo && now - watchTried > 60) {
     watchTried = now
     void watch($)
@@ -418,22 +454,13 @@ async function tick($: EngineInterface, dir: string, root: string) {
     if (!job) continue
     const isEnded = job.finished || job.stopped
     if (!isEnded && now - f.mtimeMs / 1000 > KEEP_S) continue
-    // its end on the presence clock, as the first chat to see it noted it (done:<id>@<started>)
-    const key = `${id}@${job.started}`
-    if (isEnded && !endsSeen.has(key)) {
-      const was = (await $.store.get(`done:${key}`).catch(() => undefined)) as number | undefined
-      if (was !== undefined) endsSeen.set(key, was)
-      else if (activeNow !== undefined) {
-        endsSeen.set(key, activeNow)
-        await $.store.set(`done:${key}`, activeNow).catch(() => {})
-      }
-    }
-    const row = rowOf(id, job, now, endsSeen.get(key))
+    if (isEnded) await seenOf($, `${id}@${job.started}`)
+    const row = rowOf(id, job, now)
     if (row && !gone.has(`${id}@${job.started}`)) files.push({ id, job, row })
   }
   // the caches keep only what is still listed
   for (const id of lastGood.keys()) if (!listed.has(id)) lastGood.delete(id)
-  for (const k of endsSeen.keys()) if (!listed.has(k.slice(0, k.lastIndexOf('@')))) endsSeen.delete(k)
+
   for (const k of firstSeen.keys()) if (!listed.has(k.slice(0, k.lastIndexOf('@')))) firstSeen.delete(k)
   for (const id of lastLine.keys()) if (!bg.has(id)) lastLine.delete(id)
   // this session's background shells
@@ -453,10 +480,14 @@ async function tick($: EngineInterface, dir: string, root: string) {
       }
     }
     const wasCounted = t.isCounted
+    if (t.endedAt !== undefined) await seenOf($, `bg-${id}`)
     const row = bgRowOf(id, t, now, output)
     isChanged ||= t.isCounted !== wasCounted || row === undefined
     if (row) own.push(t.spent ? { ...row, spent: spentText(t.spent) } : row)
-    else if (row === undefined) bg.delete(id)
+    else if (row === undefined) {
+      bg.delete(id)
+      await forget($, `bg-${id}`)
+    }
   }
   if (isChanged) await save($)
   // what Claude spent on this chat's file jobs; a job no longer listed is forgotten
@@ -475,7 +506,7 @@ async function tick($: EngineInterface, dir: string, root: string) {
   }
   const demoFile = (await $.fs.list(dir).catch(() => [])).find(f => f.name === 'demo.json')
   demo = demoFile ? await fresh<Demo>($, lastDemo, 'demo', `${dir}/demo.json`, demoFile.mtimeMs) : undefined
-  // another chat's ⟳ Sync on this chat's tab: a request newer than the one last seen (the first read only notes it)
+  // another chat's ⟳ Refresh on this chat's tab: a request newer than the one last seen (the first read only notes it)
   const asked = Number((await $.store.get(`sync:${selfId}`).catch(() => 0)) ?? 0)
   if (syncSeen !== undefined && asked !== syncSeen) await syncSelf($)
   syncSeen = asked
@@ -491,8 +522,16 @@ async function tick($: EngineInterface, dir: string, root: string) {
   const chats: [string, Published][] = []
   if (!demo) {
     const keys = await $.store.keys().catch(() => [] as string[])
-    for (const k of keys.filter(k => k.startsWith('done:') && !listed.has(k.slice(5, k.lastIndexOf('@')))))
-      await $.store.delete(k).catch(() => {})
+    // once a minute: a file job's mark goes with its file, any mark a day old (its chat ended with the row on)
+    if (now - sweptAt > 60) {
+      sweptAt = now
+      for (const k of keys.filter(k => k.startsWith('seen:'))) {
+        const key = k.slice(5)
+        const v = (await $.store.get(k).catch(() => undefined)) as { at?: number } | undefined
+        const isGone = !key.startsWith('bg-') && !listed.has(key.slice(0, key.lastIndexOf('@')))
+        if (isGone || now - (v?.at ?? now) > 86_400) await forget($, key)
+      }
+    }
     for (const k of keys.filter(k => k.startsWith('chat:')).sort()) {
       const sid = k.slice(5)
       const p = sid === selfId ? undefined : ((await $.store.get(k).catch(() => undefined)) as Published | undefined)
@@ -776,7 +815,7 @@ export const register: Register = on => {
     const ran = await next(e)
     const t = bg.get(String((e as { task_id?: unknown; shell_id?: unknown }).task_id ?? (e as { shell_id?: unknown }).shell_id))
     if (t && t.endedAt === undefined && !('deny' in ran) && !ran.isError) {
-      Object.assign(t, { endedAt: (await $.clock.now()) / 1000, endActive: activeNow, status: 'stopped' })
+      Object.assign(t, { endedAt: (await $.clock.now()) / 1000, status: 'stopped' })
       await save($)
     }
     return ran
@@ -790,7 +829,7 @@ export const register: Register = on => {
       const now = (await $.clock.now()) / 1000
       for (const [, id = '', status] of text.matchAll(/<task-id>([^<]+)<\/task-id>[\s\S]*?<status>([^<]+)<\/status>/g)) {
         const t = bg.get(id)
-        if (t && t.status === undefined) Object.assign(t, { endedAt: t.endedAt ?? now, endActive: t.endActive ?? activeNow, status })
+        if (t && t.status === undefined) Object.assign(t, { endedAt: t.endedAt ?? now, status })
         if (t && !isTurn) woke.push(id)
       }
       await save($)
@@ -807,7 +846,7 @@ export const register: Register = on => {
       for (const t of live) {
         if (t.type === 'shell' && !bg.has(t.id) && !gone.has(`bg-${t.id}`)) bg.set(t.id, trackOf(now, t.description, { isLate: true }))
       }
-      for (const [id, t] of bg) if (t.endedAt === undefined && !live.some(l => l.id === id)) Object.assign(t, { endedAt: now, endActive: activeNow })
+      for (const [id, t] of bg) if (t.endedAt === undefined && !live.some(l => l.id === id)) t.endedAt = now
       await save($)
     }
     return next(e)
@@ -1033,6 +1072,7 @@ export const register: Register = on => {
         ? { rows: rowH, view: rowView(g, r) }
         : { rows: 1, view: <Box key={`head-${g.id}`} height={1}><Text bold dimColor>{g.label}</Text></Box> },
     )
+    void markSeen($, (pages[page] ?? []).map(sl => sl.r), (await $.clock.now()) / 1000)
     const cards: ReturnType<typeof rowCards> = []
     let rowTop = head
     for (const { g, r } of pages[page] ?? []) {
@@ -1051,7 +1091,7 @@ export const register: Register = on => {
         </Box>
       ) : null
 
-    // Minimized: this chat's rows alone, the session's figures over them, ⟳ Sync (this chat's); ▴ Tabs, where
+    // Minimized: this chat's rows alone, the session's figures over them, ⟳ Refresh (this chat's); ▴ Tabs, where
     // ▾ Minimize was, brings the tabs back.
     // The figures in a row, a limit with its ring; the details in a card under it.
     const nowS = (await $.clock.now()) / 1000
@@ -1088,7 +1128,7 @@ export const register: Register = on => {
               {figures}
               {stats.card.length ? <Box {...lifted}>{details()}</Box> : null}
             </Box>
-            <Button key="sync-mini" plain label="⟳ Sync" onPress={() => syncTab($, selfId)} />
+            <Button key="refresh-mini" plain label="⟳ Refresh" onPress={() => refreshTab($, selfId)} />
             <Button key="expand" plain label="▴ Tabs" onPress={() => update($, miniAtom, () => false)} />
           </Box>
           {list.map(it => it.view)}
@@ -1099,8 +1139,8 @@ export const register: Register = on => {
     }
 
     // The tab row, as a browser's: All, this chat, the other chats with jobs; the open tab is the primary button.
-    // Hovered, a tab shows its tools in a card under it, in the row between the tabs and the bars: ⟳ Sync, Clear (the
-    // finished rows), and on another chat's tab ✖ Close (All's Sync brings closed tabs back).
+    // Hovered, a tab shows its tools in a card under it, in the row between the tabs and the bars: ⟳ Refresh (its sync,
+    // and its finished rows leave), and on another chat's tab ✖ Close (All's Refresh brings closed tabs back).
     const short = (t: string) => (t.length > 24 ? `${t.slice(0, 23)}…` : t)
     const running = (g: Group) => g.rows.filter(r => !isOver(r)).length
     const tab = (id: string, text: string, count: number, isClosable: boolean) => (
@@ -1110,8 +1150,7 @@ export const register: Register = on => {
           <Text dimColor>{count ? ` ${count}` : ''}</Text>
         </Button>
         <Box position="absolute" top={1} left={0} flexDirection="row" gap={1} paddingX={1} backgroundColor={CARD_BG} borderStyle="round" borderColor={CARD_EDGE} {...shownOr(scene === 'tools' && id === active)}>
-          <Button key={`sync:${id}`} plain label="⟳ Sync" onPress={() => syncTab($, id)} />
-          <Button key={`clear:${id}`} plain label="Clear" onPress={() => clearTab($, id)} />
+          <Button key={`refresh:${id}`} plain label="⟳ Refresh" onPress={() => refreshTab($, id)} />
           {isClosable ? (
             <Button key={`close:${id}`} plain label="✖ Close" hover={{ color: 'error', bold: true }} onPress={() => closeTab($, id, id === active)} />
           ) : null}

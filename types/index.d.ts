@@ -14,7 +14,6 @@ export type JobProgressTask = {
   output?: string
   isLate?: boolean
   endedAt?: number
-  endActive?: number // the presence clock (s the person spent at Claude) at its end
   status?: string
   isCounted?: boolean
   spent?: Spent

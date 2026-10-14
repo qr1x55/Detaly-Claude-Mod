@@ -29,9 +29,10 @@ function world(
   files: () => Record<string, unknown>,
   output = (path: string) => '',
   sessions: () => Record<string, unknown> = () => ({}),
+  vars: Record<string, string> = {},
 ) {
   const clock = mock.clock(on, { now: T0 * 1000 })
-  mock.env(on, { USERPROFILE: 'C:\\Users\\u' })
+  mock.env(on, { USERPROFILE: 'C:\\Users\\u', ...vars })
   const env: Record<string, string | undefined> = {}
   const written: Record<string, string> = {}
   const stored: Record<string, unknown> = {}
@@ -317,32 +318,48 @@ test('a quick task never shows; a finished one stays as long as it ran (15 s to 
   expect(await ui.find({ key: 'bg-q2' })).toBeUndefined() // ran 60 s: gone 60 s after its end
 })
 
-test("a finished row's time runs while the person is at Claude: away, it waits for them", async ($, on) => {
-  const { clock, stored } = world(on, () => ({}))
+test("a finished row leaves 10 min of the person's time after they first saw it; unseen, it waits", async ($, on) => {
+  const { clock, stored } = world(on, () => ({}), () => '', () => ({}), { OS: 'Windows_NT' })
   on('tool.call', () => ({ result: {} as never, text: 'Command running in background with ID: w1. Output is being written to: C:\\T\\tasks\\w1.output' }))
-  // another chat's watcher keeps the presence clock; here its value is set by hand, kept fresh
+  // the presence watcher answers once; then the clock is set by hand, kept fresh, as another chat's watcher would
+  on('process.spawn', async function* () {
+    yield { stream: 'stdout' as const, text: '0 claude\n' }
+    return { code: 0, signal: null }
+  })
   let activeS = 0
+  let here = false
   const step = async (ms: number) => {
     for (let t = 0; t < ms; t += 10_000) {
-      stored.presence = { activeS, at: clock.now() / 1000, by: 's2' }
+      stored.presence = { activeS, at: clock.now() / 1000, by: 's2', here }
       await clock.advance(10_000)
     }
   }
+  const published = () => ((stored['chat:s1'] as { rows: { id: string }[] } | undefined)?.rows ?? []).map(r => r.id)
   await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
-  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   await $.tool.call({ tool: 'Bash', command: 'python train.py', description: 'Train walk20', run_in_background: true })
-  await step(900_000) // ran 15 min: stays 10 min of the person's time
+  await step(900_000) // ran 15 min: stays 10 min of the person's time once seen
   await $.session.append({
     message: { type: 'user', content: [{ type: 'text', text: '<task-notification><task-id>w1</task-id><status>completed</status></task-notification>' }] },
   } as never)
-  await step(1_800_000) // half an hour away: the clock stands
-  expect((await ui.find({ key: 'bg-w1' }))?.text).toContain('done in 15:00')
-  activeS = 590 // back, nearly 10 min at Claude
+  // at Claude for 20 min, but this chat's band is not on screen: never drawn, not seen
+  here = true
+  for (let i = 0; i < 120; i++) {
+    activeS += 10
+    await step(10_000)
+  }
+  expect(published()).toContain('bg-w1')
+  expect(stored['seen:bg-w1']).toBeUndefined()
+  // the band shows it: seen now; 10 min of the person's time later it leaves
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   await step(20_000)
-  expect(await ui.find({ key: 'bg-w1' })).toBeDefined()
-  activeS = 610
+  expect(stored['seen:bg-w1']).toMatchObject({ active: activeS })
+  activeS += 590
+  await step(20_000)
+  expect((await ui.find({ key: 'bg-w1' }))?.text).toContain('done in 15:00')
+  activeS += 20
   await step(20_000)
   expect(await ui.find({ key: 'bg-w1' })).toBeUndefined()
+  expect(stored['seen:bg-w1']).toBeUndefined() // its mark goes with it
 })
 
 test('a name is one line; one too long for its column shows whole in a card while hovered', async ($, on) => {
@@ -392,7 +409,7 @@ test('a ✕ in place of the icon on hover: a finished row leaves at once, a runn
   expect(await ui.find({ key: 'run' })).toBeUndefined() // still running, no longer followed
 })
 
-test("tabs: this chat, All, and another chat that publishes its jobs; a tab's Close, All's Sync brings it back", async ($, on) => {
+test("tabs: this chat, All, and another chat that publishes its jobs; a tab's Close, All's Refresh brings it back", async ($, on) => {
   const other = {
     session: 's2',
     label: 'website · render the trailer',
@@ -434,21 +451,21 @@ test("tabs: this chat, All, and another chat that publishes its jobs; a tab's Cl
   expect(await tabs()).toEqual(['tab:all', 'tab:s1'])
   expect(await ui.find({ key: 's2:bg-r1' })).toBeUndefined()
 
-  // a running shell this chat stopped following comes back with its tab's Sync; All's Sync brings the closed tab
+  // a running shell this chat stopped following comes back with its tab's Refresh; All's Refresh brings the closed tab
   await $.tool.call({ tool: 'Bash', command: 'sleep 99', description: 'Bake lightmaps', run_in_background: true })
   await clock.advance(12_000)
   await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 't1', type: 'shell', status: 'running', description: 'Bake lightmaps' }] } as never)
   await ui.press({ key: 'x-bg-t1' })
   await ui.press({ key: 'yes-bg-t1' })
   expect(await ui.find({ key: 'bg-t1' })).toBeUndefined()
-  await ui.press({ key: 'sync:s1' })
+  await ui.press({ key: 'refresh:s1' })
   expect(await ui.find({ key: 'bg-t1' })).toBeDefined()
   expect(await tabs()).toEqual(['tab:all', 'tab:s1'])
-  await ui.press({ key: 'sync:all' })
+  await ui.press({ key: 'refresh:all' })
   expect(await tabs()).toEqual(['tab:all', 'tab:s1', 'tab:s2'])
 })
 
-test("another chat's Sync asks it to sync itself; Clear takes a tab's finished rows", async ($, on) => {
+test("a tab's Refresh takes its finished rows; on another chat's tab it asks that chat to sync itself", async ($, on) => {
   const other = {
     session: 's2',
     label: 'website · x',
@@ -471,19 +488,14 @@ test("another chat's Sync asks it to sync itself; Clear takes a tab's finished r
   await clock.settle()
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
 
-  await ui.press({ key: 'clear:s1' }) // this chat's finished row leaves, the running one stays
+  await ui.press({ key: 'refresh:s1' }) // this chat's finished row leaves, the running one stays
   expect(await ui.find({ key: 'b' })).toBeUndefined()
   expect(await ui.find({ key: 'a' })).toBeDefined()
   await ui.press({ key: 'tab:s2' })
-  await ui.press({ key: 'clear:s2' })
+  await ui.press({ key: 'refresh:s2' }) // its finished row hidden here, and a request s2's mod picks up
   expect(await ui.find({ key: 's2:bg-r2' })).toBeUndefined()
   expect(await ui.find({ key: 's2:bg-r1' })).toBeDefined()
-
-  // s2's Sync: its hidden row back here, and a request s2's mod picks up
-  await ui.press({ key: 'sync:s2' })
-  expect(await ui.find({ key: 's2:bg-r2' })).toBeDefined()
-  const asked = stored['sync:s2']
-  expect(asked).toBeDefined()
+  expect(stored['sync:s2']).toBeDefined()
 })
 
 test('minimized: this chat alone, no tabs; ▴ brings them back', async ($, on) => {
@@ -502,7 +514,7 @@ test('minimized: this chat alone, no tabs; ▴ brings them back', async ($, on) 
   expect(await ui.find({ key: 'tab:all' })).toBeUndefined()
   expect(await ui.find({ key: 's2:bg-r1' })).toBeUndefined()
   expect(await ui.find({ key: 'a' })).toBeDefined()
-  await ui.press({ key: 'sync-mini' }) // this chat's sync, the band stays minimized
+  await ui.press({ key: 'refresh-mini' }) // this chat's refresh, the band stays minimized
   expect(await ui.find({ key: 'a' })).toBeDefined()
   await ui.press({ key: 'expand' })
   expect(await ui.find({ key: 's2:bg-r1' })).toBeDefined() // back on the tab it was on

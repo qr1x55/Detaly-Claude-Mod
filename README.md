@@ -65,9 +65,10 @@ the three chats' engines together use ~5 % of one core.
 **Stopped.** Grey ■ `stopped after 12:04`: a task Claude stopped (TaskStop), or a job whose log `progress_tail.ps1`
 sees no process writing any more. It leaves like a done row.
 
-A done, failed or stopped row stays as long as the job ran, at least 15 s and at most 10 minutes, and that time runs
-only while you are at Claude: its window in front and the keyboard or mouse touched in the last minute. A job that
-ends while you are away waits for you. (Windows; elsewhere the minutes are plain wall-clock time.)
+A done, failed or stopped row stays until you have seen it: drawn on the band's open page (this chat's, or another
+chat's All tab) while you are at Claude, its window in front and the keyboard or mouse touched in the last minute.
+From then it stays as long as the job ran, at least 15 s and at most 10 minutes of your time at Claude. A job that
+ends while you are away waits for you. (Windows; elsewhere the minutes are plain wall-clock time from the end.)
 
 The timer and spinner rows animate; the bars do not jitter: a timer's text changes once a minute.
 
@@ -84,11 +85,11 @@ nothing in it keeps the band away until a job starts (or `/detaly`, which opens 
 ![a hovered tab's tools](docs/demo/tools.png)
 
 
-- **⟳ Sync** — this chat: rows you dismissed come back, background shells the band missed are followed again, and
-  each running shell's kind (counted or timer) is read again from its output. Another chat: its rows you hid come
-  back, and that chat is asked to sync itself. All: both, for every chat, and closed tabs come back.
-- **Clear** — the tab's finished rows leave.
-- **✖ Close** (another chat's tab) — the tab leaves; All's Sync brings it back.
+- **⟳ Refresh** — the tab's finished rows leave, and what runs is put right. This chat: running rows you dismissed
+  come back, background shells the band missed are followed again, and each running shell's kind (counted or timer) is
+  read again from its output. Another chat: its running rows you hid come back, and that chat is asked to do the same.
+  All: both, for every chat, and closed tabs come back.
+- **✖ Close** (another chat's tab) — the tab leaves; All's Refresh brings it back.
 
 ### Rows
 
@@ -123,7 +124,7 @@ nothing in it keeps the band away until a job starts (or `/detaly`, which opens 
 - **$** — what the session has cost, as `/cost` totals it.
 
 Hover the line for the details (context size, when each limit resets, cache reads and writes, session length).
-**⟳ Sync** there syncs this chat; **▴ Tabs** brings the tabs back. Minimized, the line stays even with no jobs.
+**⟳ Refresh** there refreshes this chat; **▴ Tabs** brings the tabs back. Minimized, the line stays even with no jobs.
 
 On the tab row, **ⓘ Info** (left of Minimize) shows the same figures and details in a card; press it to pin the card.
 
@@ -150,8 +151,8 @@ On the tab row, **ⓘ Info** (left of Minimize) shows the same figures and detai
   nobody has written for a week when they start; the mod itself cannot delete files. A `sessions/` folder there is
   left from versions before 0.1.0: delete it.
 - The same store also holds the **presence clock** (`presence`: how many seconds you have spent at Claude, never
-  what you did) and, per finished progress-file job, where that clock stood when it ended (`done:<id>@<start>`, removed
-  with the file).
+  what you did) and, per finished row, where that clock stood when you first saw it (`seen:<row>`, removed with the
+  row, or after a day).
 - The session's state (Claude Code's own store for mods): the chat's background tasks, the open tab, minimized or
   not, and the token counts.
 - **One small PowerShell process** (Windows), started by one of the open chats: every 10 s it asks Windows how long
