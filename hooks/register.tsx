@@ -882,17 +882,18 @@ export const register: Register = on => {
       </Box>
     )
     // A row's cards: the whole name and what Claude spent, drawn last in the band at the row's place, so nothing drawn
-    // after paints over them; lit through the row's hover groups.
+    // after paints over them; lit through the row's hover groups. No key: a keyed Box lights by the pointer on itself
+    // (hidden, never), not by its group.
     const rowCards = (g: Group, r: Row, top: number) => [
       isCut(r.title) ? (
-        <Box key={`cn-${keyOf(g, r)}`} position="absolute" top={top} left={ICON_W + 2} width={Math.ceil((1.25 * namePx(r.title)) / CELL_PX) + 2} paddingX={1} backgroundColor={CARD_BG} borderStyle="round" borderColor={CARD_EDGE} {...shownOr(scene === 'name' && r.id === shownCut, `dn-${keyOf(g, r)}`)}>
+        <Box position="absolute" top={top} left={ICON_W + 2} width={Math.ceil((1.25 * namePx(r.title)) / CELL_PX) + 2} paddingX={1} backgroundColor={CARD_BG} borderStyle="round" borderColor={CARD_EDGE} {...shownOr(scene === 'name' && r.id === shownCut, `dn-${keyOf(g, r)}`)}>
           <Text bold color={CARD_TEXT}>
             {r.title}
           </Text>
         </Box>
       ) : null,
       r.spent ? (
-        <Box key={`cs-${keyOf(g, r)}`} position="absolute" top={top} right={hasMore ? 3 : 0} width={r.spent.length + 2} paddingX={1} backgroundColor={CARD_BG} borderStyle="round" borderColor={CARD_EDGE} {...shownOr(scene === 'spent' && r.id === shownSpent, `ds-${keyOf(g, r)}`)}>
+        <Box position="absolute" top={top} right={hasMore ? 3 : 0} width={r.spent.length + 2} paddingX={1} backgroundColor={CARD_BG} borderStyle="round" borderColor={CARD_EDGE} {...shownOr(scene === 'spent' && r.id === shownSpent, `ds-${keyOf(g, r)}`)}>
           <Text color={CARD_TEXT}>{r.spent}</Text>
         </Box>
       ) : null,
