@@ -951,6 +951,9 @@ export const register: Register = on => {
         })}
       </Box>
     )
+    // A card the desktop lifts out of the band while its keyed Box is hovered (scope-less, hidden, placed): drawn in the
+    // band it was cut at the band's edge (the band clips), lifted it sits above the Box, or under it without room there.
+    const lifted = { position: 'absolute' as const, top: 1, left: 0, flexDirection: 'column' as const, paddingX: 1, backgroundColor: CARD_BG, borderStyle: 'round', borderColor: CARD_EDGE, ...shownOr(false) }
     const details = stats.card.map(l => (
       <Text key={l} color={CARD_TEXT}>
         {l}
@@ -961,8 +964,9 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column">
           <Box flexDirection="row" alignItems="center" height={1} gap={2}>
-            <Box flexGrow={1} flexShrink={1} hover={heat('detaly-stats')}>
+            <Box key="stat-figures" flexGrow={1} flexShrink={1}>
               {figures}
+              {details.length ? <Box {...lifted}>{details}</Box> : null}
             </Box>
             <Button key="sync-mini" plain label="⟳ Sync" onPress={() => syncTab($, selfId)} />
             <Button key="expand" plain label="▴ Tabs" onPress={() => update($, miniAtom, () => false)} />
@@ -970,11 +974,6 @@ export const register: Register = on => {
           {list.map(it => it.view)}
           {pager}
           {cards}
-          {details.length ? (
-            <Box position="absolute" top={1} left={0} flexDirection="column" paddingX={1} backgroundColor={CARD_BG} borderStyle="round" borderColor={CARD_EDGE} {...shownOr(false, 'detaly-stats')}>
-              {details}
-            </Box>
-          ) : null}
         </Box>
       )
     }
@@ -1010,7 +1009,7 @@ export const register: Register = on => {
             {others.map(g => tab(g.id, short(g.label), running(g), true))}
             <Box flexGrow={1} />
             {/* ⓘ Info: the minimized row's figures and details in a card, while hovered or once pressed */}
-            <Box flexDirection="row" hover={heat('detaly-info')}>
+            <Box key="info" flexDirection="row">
               <Button
                 key="info-btn"
                 plain
@@ -1020,6 +1019,12 @@ export const register: Register = on => {
                   $.ui.invalidate('ui.render')
                 }}
               />
+              {isInfoPinned || scene === 'info' ? null : (
+                <Box {...lifted}>
+                  {figures}
+                  {details}
+                </Box>
+              )}
             </Box>
             <Button key="mini" plain label="▾ Minimize" onPress={() => update($, miniAtom, () => true)} />
           </Box>
@@ -1027,10 +1032,12 @@ export const register: Register = on => {
         {list.map(it => it.view)}
         {pager}
         {cards}
-        <Box position="absolute" top={1} right={0} flexDirection="column" paddingX={1} backgroundColor={CARD_BG} borderStyle="round" borderColor={CARD_EDGE} {...shownOr(isInfoPinned || scene === 'info', 'detaly-info')}>
-          {figures}
-          {details}
-        </Box>
+        {isInfoPinned || scene === 'info' ? (
+          <Box position="absolute" top={1} right={0} display="flex" flexDirection="column" paddingX={1} backgroundColor={CARD_BG} borderStyle="round" borderColor={CARD_EDGE}>
+            {figures}
+            {details}
+          </Box>
+        ) : null}
       </Box>
     )
   })
