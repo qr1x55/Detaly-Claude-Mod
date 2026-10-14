@@ -565,6 +565,30 @@ test("a shell's row carries what Claude spent on it, in a card while hovered", a
   expect(texts).toContain('Claude on it: $0.12 · 50k in · 900 out · 1 response')
 })
 
+test('a shell launched while its response still streams is charged that response', async ($, on) => {
+  const { clock } = world(on, () => ({}))
+  let usd = 1
+  on('session.usage', () => ({ value: { startedAt: T0 * 1000, context: { window: 1_000_000, percent: 3 }, rateLimits: [], cost: { usd } } }))
+  on('tool.call', () => ({ result: {} as never, text: 'Command running in background with ID: ggg888. Output is being written to: C:\\T\\tasks\\ggg888.output' }))
+  const input = { command: 'python train.py', description: 'Train walk13', run_in_background: true }
+  on('turn.step', async function* ($, e) {
+    yield { kind: 'text' as const, index: 0, text: 'Starting it.' }
+    usd = 1.25
+    const usage = { input_tokens: 10, cache_read_input_tokens: 40_000, cache_creation_input_tokens: 0, output_tokens: 300, model: 'm' }
+    return { turnId: e.turnId, index: e.index, answer: '', toolUses: [{ name: 'Bash', input }], stopReason: 'tool_use' as const, usage }
+  })
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  const step = $.turn.step({ turnId: 't1', index: 0, model: 'm', messageCount: 1 })
+  await step.next() // the response is streaming
+  await $.tool.call({ tool: 'Bash', ...input }) // the engine runs a call as soon as it is whole, before the response ends
+  for await (const _ of step);
+  await step.result
+  await clock.advance(12_000) // a shell shows once it has run 10 s
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  const texts = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts).toContain('Claude on it: $0.25 · 40k in · 300 out · 1 response')
+})
+
 test("a chat silent for an hour leaves the shared store; one that ends takes its own entry out", async ($, on) => {
   const { clock, stored } = world(on, () => ({}))
   on('session.end', () => ({ sessionId: 's1' }) as never) // the engine's own end

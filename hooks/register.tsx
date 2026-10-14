@@ -162,6 +162,9 @@ let isTurn = false
 let woke: string[] = [] // shells whose end arrived while no turn ran: the next turn is theirs
 let turnOf: string[] = [] // the shells the running turn is charged to
 let launchShare: Spent | undefined // the last response's share for each shell it launched
+// the shells launched while a response still streams: the engine runs a call as soon as it is whole, before the
+// response ends and its cost is known
+let launchedInStep: string[] | undefined
 const plus = (a: Spent | undefined, b: Spent): Spent => ({
   tokensIn: (a?.tokensIn ?? 0) + b.tokensIn,
   out: (a?.out ?? 0) + b.out,
@@ -648,7 +651,8 @@ export const register: Register = on => {
     if (e.run_in_background) {
       const id = launched((await $.clock.now()) / 1000, e.description, e.command, ran.text)
       const t = id ? bg.get(id) : undefined
-      if (t && launchShare) t.spent = plus(t.spent, launchShare)
+      if (id && launchedInStep) launchedInStep.push(id)
+      else if (t && launchShare) t.spent = plus(t.spent, launchShare)
       await save($)
     }
     return ran
@@ -1054,7 +1058,14 @@ export const register: Register = on => {
   // Every model response's tokens, summed for the session (subagents' too): the API's usage, as it reports it.
   on('turn.step', async function* ($, e, next) {
     const before = (await $.session.usage().catch(() => undefined))?.cost?.usd
-    const r = yield* next(e)
+    const mine: string[] = []
+    if (!e.agentId) launchedInStep = mine
+    let r
+    try {
+      r = yield* next(e)
+    } finally {
+      if (launchedInStep === mine) launchedInStep = undefined
+    }
     const u = r?.usage
     if (u && r) {
       const after = (await $.session.usage().catch(() => undefined))?.cost?.usd
@@ -1067,11 +1078,11 @@ export const register: Register = on => {
       const { named, launches } = chargesOf(r.toolUses, bg.keys(), turnOf)
       const each = named.length + launches ? share(s, named.length + launches) : undefined
       launchShare = launches ? each : undefined
-      for (const id of named) {
+      for (const id of [...named, ...mine]) {
         const t = bg.get(id)
         if (t && each) t.spent = plus(t.spent, each)
       }
-      if (named.length) await save($)
+      if (named.length + mine.length) await save($)
       const now = await $.clock.now()
       await update($, tokensAtom, t => ({
         since: t.since || now,
