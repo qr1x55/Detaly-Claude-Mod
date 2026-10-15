@@ -726,19 +726,24 @@ const split = (w: number, h: number, fw: number, light: string, dark: string) =>
   )
 }
 
+// An animation's start in the past, so it runs on the wall clock: a desktop draws each Svg as a new image whenever the
+// band is drawn again (every tick while a job counts), and an image's animation starts from its beginning; begun
+// `t mod dur` ago, the new image picks up where the old one was.
+const since = (t: number, dur: number) => `begin="-${(t % dur).toFixed(2)}s"`
+
 // A timer's bar, animated so a wait does not look stalled (SMIL in a plain image: no frame to reload and flash):
 // filled to f with stripes running through it, or without f a soft segment sweeping the track; "waiting" inside, so
-// it does not read as work counted.
-const svgWait = (w: number, h: number, f: number | undefined) => {
+// it does not read as work counted. t: now, unix s.
+const svgWait = (w: number, h: number, f: number | undefined, t: number) => {
   const c = HEX.run
   const body =
     f === undefined
       ? `<defs><linearGradient id="g"><stop offset="0" stop-color="${c}" stop-opacity="0"/><stop offset="0.5" stop-color="${c}"/>` +
         `<stop offset="1" stop-color="${c}" stop-opacity="0"/></linearGradient></defs>${pill(w, h)}` +
-        `<rect width="80" height="${h}" fill="url(#g)"><animate attributeName="x" values="-80;${w};-80" dur="${(3 * w) / 160}s" repeatCount="indefinite"/></rect>`
+        `<rect width="80" height="${h}" fill="url(#g)"><animate attributeName="x" values="-80;${w};-80" dur="${(3 * w) / 160}s" ${since(t, (3 * w) / 160)} repeatCount="indefinite"/></rect>`
       : `<defs><pattern id="s" width="${h}" height="${h}" patternUnits="userSpaceOnUse">` +
         `<path d="M0 ${h}L${h / 2} 0H${h}L${h / 2} ${h}Z" fill="#fff" fill-opacity="0.2"/>` +
-        `<animateTransform attributeName="patternTransform" type="translate" from="0 0" to="${h} 0" dur="1s" repeatCount="indefinite"/></pattern></defs>` +
+        `<animateTransform attributeName="patternTransform" type="translate" from="0 0" to="${h} 0" dur="1s" ${since(t, 1)} repeatCount="indefinite"/></pattern></defs>` +
         pill(w, h) +
         pill(Math.max(h, Math.round(f * w)), h, c, ' fill-opacity="0.85"') +
         pill(Math.max(h, Math.round(f * w)), h, 'url(#s)')
@@ -750,12 +755,12 @@ const svgWait = (w: number, h: number, f: number | undefined) => {
 
 // A timer's ring: filled clockwise to f, or an arc spinning without f (SMIL).
 const RING = 2 * Math.PI * 5.5
-const svgRing = (f: number | undefined, hex: string) => {
+const svgRing = (f: number | undefined, hex: string, t = 0) => {
   const arc = `cx="7" cy="7" r="5.5" fill="none" stroke-width="2"`
   const fill =
     f === undefined
       ? `<circle ${arc} stroke="${hex}" stroke-linecap="round" stroke-dasharray="9 ${RING}">` +
-        `<animateTransform attributeName="transform" type="rotate" from="0 7 7" to="360 7 7" dur="1s" repeatCount="indefinite"/></circle>`
+        `<animateTransform attributeName="transform" type="rotate" from="0 7 7" to="360 7 7" dur="1s" ${since(t, 1)} repeatCount="indefinite"/></circle>`
       : `<circle ${arc} stroke="${hex}" stroke-dasharray="${(f * RING).toFixed(1)} ${RING}" transform="rotate(-90 7 7)"/>`
   return `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 14 14"><circle ${arc} stroke="#888" stroke-opacity="0.35"/>${fill}</svg>`
 }
@@ -853,6 +858,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const drawnAt = (await $.clock.now()) / 1000 // the animations' phase
     if (e.props.hasSurvey) return next(e)
     const stored = await read($, tabAtom)
     const closed = await read($, closedAtom)
@@ -935,7 +941,7 @@ export const register: Register = on => {
       if (!r.isTimer || r.state !== 'run') return <Text color={COLOR[r.state]}>{ICON[r.state]}</Text>
       if (Svg) {
         const alt = r.f === undefined ? 'running' : `${Math.floor(r.f * 100)} %`
-        return <Svg source={svgRing(r.f, HEX[r.state])} alt={alt} width={14} height={14} />
+        return <Svg source={svgRing(r.f, HEX[r.state], drawnAt)} alt={alt} width={14} height={14} />
       }
       const glyph = r.f === undefined ? '◌' : '○◔◑◕●'[Math.min(4, Math.round(r.f * 4))]
       return <Text color={COLOR[r.state]}>{glyph}</Text>
@@ -945,7 +951,7 @@ export const register: Register = on => {
       const barH = thin ? THIN_H : BAR_H // not 'h': that is the JSX factory
       if (r.isTimer && r.state === 'run') {
         const alt = r.f === undefined ? 'waiting' : `${Math.floor(r.f * 100)} % of the wait`
-        if (Svg) return <Svg source={svgWait(px, barH, r.f)} alt={alt} width={px} height={barH + 2 * padOf(barH)} />
+        if (Svg) return <Svg source={svgWait(px, barH, r.f, drawnAt)} alt={alt} width={px} height={barH + 2 * padOf(barH)} />
         if (r.f !== undefined) return <Text color={COLOR.run} dimColor>{'━'.repeat(Math.floor(r.f * barW)).padEnd(barW, '─')}</Text>
         return <Text color="subtle">{'┄'.repeat(barW)}</Text>
       }
