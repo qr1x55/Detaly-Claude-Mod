@@ -109,7 +109,7 @@ test('own session and own project only; bar, percent, counts, ETA; stalled; stop
     const numbers = async () => [(await ui.find({ key: 'train5' }))?.text, ...(await ui.findAll({ type: 'Svg' })).map(svg => svg.props.alt)].join(' | ')
     const rows = (await ui.findAll({ type: 'Box' })).filter(b => b.key !== undefined && !/-name$|^tab|^group-|^info$|^stat-|^[nb]-/.test(b.key)).map(b => b.key)
     expect(rows).toEqual(['dl', 'manual', 'train5', 'cut'])
-    expect((await ui.find({ key: 'cut' }))?.text).toContain('stopped')
+    expect((await ui.find({ key: 'cut' }))?.text).toContain(`stopped · ${hm(T0 - 40)}`) // and when: its last update
     expect((await ui.find({ key: 'train5' }))?.text).toContain('train5')
     expect(await numbers()).toContain('61 %')
     expect(await numbers()).toContain('1850 / 3000 it')
@@ -313,7 +313,7 @@ test('a quick task never shows; a finished one stays as long as it ran (15 s to 
   await clock.advance(48_000)
   await end('q2')
   await clock.advance(50_000)
-  expect((await ui.find({ key: 'bg-q2' }))?.text).toContain('done in 1:00')
+  expect((await ui.find({ key: 'bg-q2' }))?.text).toContain(`done in 1:00 · ${hm(T0 + 60)}`)
   await clock.advance(12_000)
   expect(await ui.find({ key: 'bg-q2' })).toBeUndefined() // ran 60 s: gone 60 s after its end
 })

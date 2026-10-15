@@ -290,7 +290,7 @@ export function bgRowOf(id: string, t: Bg, now: number, output?: string): Row | 
   if (t.endedAt !== undefined) {
     const isOk = t.status === undefined || t.status === 'completed'
     const isStop = t.status === 'stopped' || t.status === 'killed'
-    const tail = `${isOk ? 'done in' : `${isStop ? 'stopped' : t.status} after`} ${shown}`
+    const tail = `${isOk ? 'done in' : `${isStop ? 'stopped' : t.status} after`} ${shown} · ${clockAt(now, t.endedAt - now)}` // and when
     const state = isOk ? 'done' : isStop ? 'stop' : 'fail'
     return { id: `bg-${id}`, title: t.title, f: isOk ? 1 : undefined, counts: '', tail, state, isTimer: !t.isCounted, seen: `bg-${id}` }
   }
@@ -326,7 +326,8 @@ export function rowOf(id: string, j: Job, now: number): Row | undefined {
   const total = j.total ?? 0
   const unit = j.unit ? ` ${j.unit}` : ''
   const state: State = j.finished ? 'done' : j.stopped ? 'stop' : age > STALE_S ? 'stale' : 'run'
-  let tail = state === 'done' ? 'done' : state === 'stop' ? 'stopped' : state === 'stale' ? `stalled ${dur(age)}` : ''
+  const at = clockAt(now, updated - now) // when it ended: its last update
+  let tail = state === 'done' ? `done · ${at}` : state === 'stop' ? `stopped · ${at}` : state === 'stale' ? `stalled ${dur(age)}` : ''
   if (state === 'run' && total > 0) {
     let eta = j.eta_s ?? undefined
     if (eta === undefined) {
@@ -890,9 +891,9 @@ export const register: Register = on => {
     // by the surface: the element table answers any name ('Svg' in it is true on the terminal too)
     const Svg = e.surface === 'desktop' || e.surface === 'mobile' ? $.ui.resolve(e).Svg : undefined
     // Columns: icon, name (under a fifth of the band; one line, the whole on hover), bar (the rest; a counted row's
-    // numbers inside it), time (right-aligned, as wide as its longest text, 12 to 24). Every row is two lines tall, or one
+    // numbers inside it), time (right-aligned, as wide as its longest text, 12 to 28). Every row is two lines tall, or one
     // when they overflow (below).
-    const tailW = Math.max(12, Math.min(24, Math.max(0, ...all.map(r => r.tail.length))))
+    const tailW = Math.max(12, Math.min(28, Math.max(0, ...all.map(r => r.tail.length))))
     const nameW = Math.max(12, Math.min(22, Math.floor(e.props.bodyColumns * 0.18)))
     const isCut = (t: string) => (Svg ? namePx(t) > nameW * CELL_PX : t.length > nameW)
     shownCut = all.find(r => isCut(r.title))?.id

@@ -54,15 +54,15 @@ the three chats' engines together use ~5 % of one core.
 
 ![stalled](docs/row-stalled.png)
 
-**Done.** Green, full bar, how long it ran.
+**Done.** Green, full bar, how long it ran and the local time it ended (`done in 1:00:57 · 14:32`).
 
 ![done](docs/row-done.png)
 
-**Failed.** Red, with the time it ran.
+**Failed.** Red, with the time it ran and when it ended.
 
 ![failed](docs/row-failed.png)
 
-**Stopped.** Grey ■ `stopped after 12:04`: a task Claude stopped (TaskStop), or a job whose log `progress_tail.ps1`
+**Stopped.** Grey ■ `stopped after 12:04 · 14:32`: a task Claude stopped (TaskStop), or a job whose log `progress_tail.ps1`
 sees no process writing any more. It leaves like a done row.
 
 A done, failed or stopped row stays until you have seen it: drawn on the band's open page (this chat's, or another
