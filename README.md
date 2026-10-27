@@ -77,8 +77,8 @@ The timer and spinner rows animate; the bars do not jitter: a timer's text chang
 ### Tabs
 
 **All** (every chat's jobs, a heading per chat), **this chat**, and **each other open chat with jobs**, named by its
-folder and the start of its first message. The open tab is lit; the count is its running jobs. A chat's tab with
-nothing in it keeps the band away until a job starts (or `/detaly`, which opens All).
+folder and the start of its first message. The open tab is lit; the count is its running jobs. With no jobs the band
+stays one strip: the tab row, ⓘ Info and ▾ Minimize (`/detaly` opens All).
 
 **Hover a tab** and its tools show in a card under it:
 

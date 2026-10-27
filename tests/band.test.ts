@@ -194,7 +194,7 @@ test('background shells: timer against the described estimate, progress from out
   expect(await ui.find({ key: 'bg-aaa111' })).toBeUndefined()
 })
 
-test('ETA from the rate when the job gives none; nothing drawn without jobs', async ($, on) => {
+test('ETA from the rate when the job gives none; without jobs the tab row alone', async ($, on) => {
   let done = 0
   const { clock } = world(on, () =>
     done === 0 ? {} : { 'job.json': { title: 'job', done, total: 100, unit: 'it', started: T0, updated: clock.now() / 1000 } },
@@ -203,7 +203,9 @@ test('ETA from the rate when the job gives none; nothing drawn without jobs', as
   await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
   await clock.settle()
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
-  expect(await ui.find({ type: 'Text' })).toBeUndefined()
+  // no jobs: the tab row alone
+  expect((await ui.findAll({ type: 'Button' })).map(b => b.key)).toEqual(expect.arrayContaining(['tab:all', 'tab:s1', 'info-btn', 'mini']))
+  expect(await ui.find({ type: 'Svg' })).toBeUndefined()
 
   done = 10 // first seen at T0+2 s with 10 done
   await clock.advance(10_000)

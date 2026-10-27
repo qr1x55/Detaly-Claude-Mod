@@ -879,9 +879,8 @@ export const register: Register = on => {
     const active = scene
       ? ['all', 'info', 'tools'].includes(scene) ? 'all' : selfId
       : !isMini && (stored === 'all' || tabs.some(g => g.id === stored && !g.isSelf)) ? stored : selfId
-    // this chat's tab with nothing in it: the band stays away (/detaly, or a job, brings it); minimized, its top row
-    // stays, a strip of the session's figures and ▴ Tabs
-    if (!isMini && active === selfId && !self?.rows.length) return next(e)
+    // with no jobs anywhere the band stays a strip: the tab row (All, this chat, ⓘ Info, ▾ Minimize), or minimized the
+    // session's figures, ⟳ Refresh and ▴ Tabs
     const shown = active === 'all' ? tabs.filter(g => g.rows.length > 0) : tabs.filter(g => g.id === active)
     const all = shown.flatMap(g => g.rows)
     const shownSpent = all.find(r => r.spent)?.id
