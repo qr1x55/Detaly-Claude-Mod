@@ -1156,8 +1156,16 @@ export const register: Register = on => {
     // The tab row, as a browser's: All, this chat, the other chats with jobs; the open tab is the primary button.
     // Hovered, a tab shows its tools in a card under it, in the row between the tabs and the bars: ⟳ Refresh (its sync,
     // and its finished rows leave), and on another chat's tab ✖ Close (All's Refresh brings closed tabs back).
-    const short = (t: string) => (t.length > 24 ? `${t.slice(0, 23)}…` : t)
     const running = (g: Group) => g.rows.filter(r => !isOver(r)).length
+    const others = tabs.filter(g => !g.isSelf)
+    // The chats' tabs share what the row leaves: up to 24 letters a name, fewer (4 at least) when they would not fit
+    // between All and ⓘ Info. ponytail: a button is reckoned as its letters and 3 cells of padding, a gap 1, Info and
+    // Minimize 24 together (measured on a desktop at 100 %); a face wider than that pushes Minimize off the row's end.
+    const named = [...(self ? [self] : []), ...others]
+    const costOf = (text: string, n: number) => text.length + (n ? String(n).length + 1 : 0) + 3 + 1
+    const left = e.props.bodyColumns - 24 - costOf('All', 1) - named.reduce((n, g) => n + costOf('', running(g)), 0)
+    const nameRoom = Math.max(4, Math.min(24, Math.floor(left / Math.max(1, named.length))))
+    const short = (t: string) => (t.length > nameRoom ? `${t.slice(0, nameRoom - 1)}…` : t)
     const tab = (id: string, text: string, count: number, isClosable: boolean) => (
       <Box key={`tab-${id}`} flexDirection="row" alignItems="center">
         <Button key={`tab:${id}`} variant={id === active ? 'primary' : undefined} onPress={() => update($, tabAtom, () => id)}>
@@ -1172,7 +1180,6 @@ export const register: Register = on => {
         </Box>
       </Box>
     )
-    const others = tabs.filter(g => !g.isSelf)
 
     return (
       <Box flexDirection="column">

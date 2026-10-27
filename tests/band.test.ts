@@ -502,6 +502,25 @@ test("a tab's Refresh takes its finished rows; on another chat's tab it asks tha
   expect(stored['sync:s2']).toBeDefined()
 })
 
+test("the chats' tabs shrink their names to share the row between All and ⓘ Info", async ($, on) => {
+  const chat = (id: string) => ({ session: id, label: `website · render the trailer for ${id}`, updated: T0, rows: [{ id: 'bg-r', title: 'Render', f: 0.5, counts: '', tail: '', state: 'run' }] })
+  const { clock } = world(on, () => ({}), () => '', () => ({ s2: chat('s2'), s3: chat('s3'), s4: chat('s4'), s5: chat('s5') }))
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  const names = async (columns: number) => {
+    const ui = await $.ui.mount({ ...BAND, props: { ...BAND.props, bodyColumns: columns }, surface: 'desktop' })
+    await ui.press({ key: 'tab:all' })
+    const buttons = await ui.findAll({ type: 'Button' })
+    expect(buttons.map(b => b.key)).toEqual(expect.arrayContaining(['tab:all', 'tab:s1', 'tab:s5', 'info-btn', 'mini']))
+    const texts = buttons.filter(b => /^tab:s[2-5]$/.test(b.key ?? '')).map(b => (b.text ?? '').replace(/ \d+$/, ''))
+    await ui.unmount()
+    return texts
+  }
+  for (const t of await names(200)) expect(t).toBe('website · render the tr…') // room: 24 letters each, the … one
+  const narrow = await names(100) // 5 named tabs: (100 - 24 - 9 - 5 * 6) / 5 = 7
+  for (const t of narrow) expect(t).toBe('websit…')
+})
+
 test('minimized: this chat alone, no tabs; ▴ brings them back', async ($, on) => {
   const other = { session: 's2', label: 'website · x', updated: T0, rows: [{ id: 'bg-r1', title: 'Render', f: 0.5, counts: '', tail: '', state: 'run' }] }
   const { clock } = world(
