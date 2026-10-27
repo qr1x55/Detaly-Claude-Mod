@@ -134,7 +134,7 @@ On the tab row, **ⓘ Info** (left of Minimize) shows the same figures and detai
 
 - Claude Code **2.1.286 or newer** with mods (function hooks). In the desktop app: a *local* Code tab session (not
   WSL, not cloud); `/status` shows the version.
-- **Tested on Windows 11** only: the Claude desktop app's Code tab with its bundled Claude Code 2.1.295, at 100 %
+- **Tested on Windows 11** only: the Claude desktop app's Code tab with its bundled Claude Code 2.1.295 to 2.1.308, at 100 %
   zoom. The code is meant to be cross-platform (`USERPROFILE` or `HOME`) and has a terminal fallback for every
   picture, but macOS, Linux and the terminal are untried; reports welcome. `bin/progress_tail.ps1` needs PowerShell
   (`pwsh` on macOS / Linux).

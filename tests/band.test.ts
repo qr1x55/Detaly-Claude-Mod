@@ -57,12 +57,16 @@ function world(
   })
   on('session.id', () => ({ value: 's1' }))
   on('session.root', () => ({ value: 'D:\\dev\\game\\.claude\\worktrees\\brave-x' }))
+  // the transcript: the first rows, then what a test adds (`transcript`)
+  const transcript: unknown[] = []
   on('session.messages', () => ({
     value: [
       { role: 'user', text: 'You are operating in a git worktree.', toolUses: [] }, // the engine's own row
       { role: 'user', text: '<system-reminder>notes</system-reminder>train the walking net', toolUses: [] },
+      ...transcript,
     ],
   }) as never)
+  on('prompt.submit', ($, e) => ({ text: e.text }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', () => ({ value: undefined }) as never)
   on('ui.render', () => ({ type: 'Box' as const })) // the engine's own (empty) band
@@ -81,8 +85,18 @@ function world(
     written[e.path] = e.text
     return { value: undefined }
   })
-  return { clock, env, written, stored }
+  return { clock, env, written, stored, transcript }
 }
+
+// A background task's notification, as the engine submits it
+const notify = ($: { prompt: { submit: (e: never) => Promise<unknown> } }, id: string, status = 'completed') =>
+  $.prompt.submit({ text: `<task-notification><task-id>${id}</task-id><status>${status}</status></task-notification>`, origin: { kind: 'task-notification' }, wait: false } as never)
+// A transcript's row for a shell Claude ran in the background
+const launchRow = (id: string, description: string) => ({
+  role: 'assistant',
+  text: '',
+  toolUses: [{ tool_use_id: `u-${id}`, tool: 'Bash', input: { command: 'x', description, run_in_background: true }, text: `Command running in background with ID: ${id}. Output is being written to: C:\\T\\tasks\\${id}.output` }],
+})
 
 test('own session and own project only; bar, percent, counts, ETA; stalled; stopped; old finished dropped', async ($, on) => {
   const job = (more: object) => ({ done: 50, total: 200, unit: 'it', started: T0 - 100, updated: T0, ...more })
@@ -124,7 +138,7 @@ test('own session and own project only; bar, percent, counts, ETA; stalled; stop
 test('background shells: timer against the described estimate, progress from output, end from the notification', async ($, on) => {
   let output = ''
   const outputOf = (path: string) => (path.includes('aaa111') ? output : '') // the eval prints progress, the render nothing
-  const { clock } = world(on, () => ({}), outputOf)
+  const { clock, transcript } = world(on, () => ({}), outputOf)
   on('fs.stat', ($, e) => ({ value: { kind: 'file' as const, size: outputOf(e.path).length, mtimeMs: clock.now(), isLink: false } }))
   let n = 0
   on('tool.call', () => {
@@ -132,7 +146,6 @@ test('background shells: timer against the described estimate, progress from out
     const id = ['aaa111', 'bbb222', 'ddd444'][n - 1]
     return { result: {} as never, text: `Command running in background with ID: ${id}. Output is being written to: C:\\T\\tasks\\${id}.output` }
   })
-  on('classic.Stop', () => ({}))
 
   await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: 'Bash', command: 'python eval.py', description: 'Eval train5, 6 tests, ~15 min', run_in_background: true })
@@ -159,9 +172,7 @@ test('background shells: timer against the described estimate, progress from out
   expect(await eval5()).toContain('~7 min left') // 302 s for 42 %: 417 s for the 58 % left
   expect(await eval5()).not.toContain('~42')
 
-  await $.session.append({
-    message: { type: 'user', content: [{ type: 'text', text: '<task-notification><task-id>aaa111</task-id><status>completed</status></task-notification>' }] },
-  } as never)
+  await notify($, 'aaa111')
   await clock.advance(2000)
   expect(await eval5()).toContain('done')
 
@@ -170,17 +181,17 @@ test('background shells: timer against the described estimate, progress from out
   await clock.advance(2000)
   expect((await ui.find({ key: 'bg-ddd444' }))?.text).toContain('stopped after 5:0')
 
-  // a reload forgot them; the turn's end lists what still runs
+  // missed while the mod was away (a reload): the transcript has two more shells running and bbb222's end; ⟳ Refresh
+  // reads it, follows the two (start unknown), ends bbb222, and takes the finished rows
   const later = hm(T0 + 1800)
-  const live = [
-    { id: 'ccc333', type: 'shell', status: 'running', description: 'Render video' },
-    { id: 'eee555', type: 'shell', status: 'running', description: `train7 check at ~${later}` },
-  ]
-  await $.classic.Stop({ stop_hook_active: false, background_tasks: live } as never)
+  transcript.push(launchRow('ccc333', 'Render video'), launchRow('eee555', `train7 check at ~${later}`))
+  transcript.push({ role: 'user', text: '<task-notification><task-id>bbb222</task-id><status>completed</status></task-notification>', toolUses: [] })
+  await ui.press({ key: 'refresh:s1' })
   await clock.advance(2000)
   expect((await ui.find({ key: 'bg-ccc333' }))?.text).toContain('≥ <1 min')
   expect((await ui.find({ key: 'bg-eee555' }))?.text).toContain(`train7 check~25 min left · ${later}`) // a clock time survives the reload
-  expect((await ui.find({ key: 'bg-bbb222' }))?.text).toContain('done')
+  expect(await ui.find({ key: 'bg-bbb222' })).toBeUndefined()
+  expect(await ui.find({ key: 'bg-aaa111' })).toBeUndefined()
 })
 
 test('ETA from the rate when the job gives none; nothing drawn without jobs', async ($, on) => {
@@ -283,9 +294,7 @@ test('background shells outlive a reload of the mod: they are kept in the sessio
   await clock.settle()
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   expect((await ui.find({ key: 'bg-fff666' }))?.text).toContain(`Render a5~10 min left · ${end}`)
-  await $.session.append({
-    message: { type: 'user', content: [{ type: 'text', text: '<task-notification><task-id>fff666</task-id><status>completed</status></task-notification>' }] },
-  } as never)
+  await notify($, 'fff666')
   expect(writes.at(-1)).toEqual([['fff666', expect.objectContaining({ endedAt: T0, status: 'completed' })]])
 })
 
@@ -297,9 +306,7 @@ test('a quick task never shows; a finished one stays as long as it ran (15 s to 
     return { result: {} as never, text: `Command running in background with ID: q${n}. Output is being written to: C:\T\tasks\q${n}.output` }
   })
   const end = (id: string) =>
-    $.session.append({
-      message: { type: 'user', content: [{ type: 'text', text: `<task-notification><task-id>${id}</task-id><status>completed</status></task-notification>` }] },
-    } as never)
+    notify($, id)
   await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   await $.tool.call({ tool: 'Bash', command: 'sleep 5', description: 'Quick wait', run_in_background: true })
@@ -338,9 +345,7 @@ test("a finished row leaves 10 min of the person's time after they first saw it;
   await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: 'Bash', command: 'python train.py', description: 'Train walk20', run_in_background: true })
   await step(900_000) // ran 15 min: stays 10 min of the person's time once seen
-  await $.session.append({
-    message: { type: 'user', content: [{ type: 'text', text: '<task-notification><task-id>w1</task-id><status>completed</status></task-notification>' }] },
-  } as never)
+  await notify($, 'w1')
   // at Claude for 20 min, but this chat's band is not on screen: never drawn, not seen
   here = true
   for (let i = 0; i < 120; i++) {
@@ -388,9 +393,7 @@ test('a ✕ in place of the icon on hover: a finished row leaves at once, a runn
   await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
   await $.tool.call({ tool: 'Bash', command: 'sleep 30', description: 'Render', run_in_background: true })
   await clock.advance(30_000)
-  await $.session.append({
-    message: { type: 'user', content: [{ type: 'text', text: '<task-notification><task-id>zz1</task-id><status>completed</status></task-notification>' }] },
-  } as never)
+  await notify($, 'zz1')
   await clock.advance(2000)
   const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
   await ui.press({ key: 'x-run' }) // running: asks first
@@ -416,14 +419,13 @@ test("tabs: this chat, All, and another chat that publishes its jobs; a tab's Cl
     updated: T0,
     rows: [{ id: 'bg-r1', title: 'Render trailer', f: 0.5, counts: '50 / 100', tail: '~1 min left · 11:01', state: 'run' }],
   }
-  const { clock, stored } = world(
+  const { clock, stored, transcript } = world(
     on,
     () => ({ 'mine.json': { title: 'Resize images', done: 5, total: 10, updated: T0, started: T0 - 10, session: 's1' } }),
     () => '',
     () => ({ s2: other }),
   )
   on('tool.call', () => ({ result: {} as never, text: 'Command running in background with ID: t1. Output is being written to: C:\T\t1.output' }))
-  on('classic.Stop', () => ({}))
   await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
   await clock.settle()
 
@@ -454,7 +456,7 @@ test("tabs: this chat, All, and another chat that publishes its jobs; a tab's Cl
   // a running shell this chat stopped following comes back with its tab's Refresh; All's Refresh brings the closed tab
   await $.tool.call({ tool: 'Bash', command: 'sleep 99', description: 'Bake lightmaps', run_in_background: true })
   await clock.advance(12_000)
-  await $.classic.Stop({ stop_hook_active: false, background_tasks: [{ id: 't1', type: 'shell', status: 'running', description: 'Bake lightmaps' }] } as never)
+  transcript.push(launchRow('t1', 'Bake lightmaps'))
   await ui.press({ key: 'x-bg-t1' })
   await ui.press({ key: 'yes-bg-t1' })
   expect(await ui.find({ key: 'bg-t1' })).toBeUndefined()

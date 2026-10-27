@@ -53,7 +53,6 @@ const FORGET_S = 3600
 let groups: Group[] = []
 let selfId = '' // this session
 let label = '' // this session's tab: "<folder> · <start of its first message>"
-let lastLive: { id: string; type: string; description: string }[] = [] // what ran at the last turn's end
 let published = ''
 let publishedAt = 0
 const lastPub = new Map<string, { mtime: number; v: Published }>() // read again only when the file moved
@@ -152,6 +151,47 @@ function trackOf(now: number, description: string, more: Partial<Bg>): Bg {
   if (until === undefined) return { title: description, started: now, expectS: more.isLate ? undefined : expectOf(description), ...more }
   const title = description.replace(UNTIL, '').replace(/\s{2,}/g, ' ').replace(/[\s,;:]+$/, '') || description
   return { title, started: now, expectS: until, isUntil: true, ...more }
+}
+
+// A background task's end as its notification says it: <task-id>, then <status>.
+const NOTE = /<task-id>([^<]+)<\/task-id>[\s\S]*?<status>([^<]+)<\/status>/g
+
+// What the transcript says of this session's background shells: each launch (a Bash or PowerShell call run in the
+// background, its result naming the id), each end (a notification, a TaskStop or KillShell). Read when the mod loads
+// and at ⟳ Refresh, in place of the list of what still runs that a turn's end (classic.Stop) carried: a security
+// default seated for an organization keeps classic events, and the notifications' rows, from a person's mods. Shells
+// still running that the mod does not follow (missed, or dismissed while running) are followed again, start unknown;
+// followed ones that ended are ended.
+async function reconcile($: EngineInterface) {
+  const msgs = await $.session.messages().catch(() => [])
+  const launches = new Map<string, { title: string; output?: string }>()
+  const ends = new Map<string, string>()
+  for (const m of msgs) {
+    for (const [, id = '', status = ''] of m.text.matchAll(NOTE)) ends.set(id, status)
+    for (const u of m.toolUses) {
+      const input = u.input as { run_in_background?: unknown; description?: unknown; command?: unknown; task_id?: unknown; shell_id?: unknown }
+      if (/^(Bash|PowerShell)$/.test(u.tool) && input.run_in_background === true) {
+        const id = /with ID: (\w+)/.exec(u.text ?? '')?.[1]
+        const title = String(input.description ?? '').trim() || String(input.command ?? '').slice(0, 60)
+        if (id) launches.set(id, { title, output: /written to: (.+?\.output)/.exec(u.text ?? '')?.[1] })
+      } else if (/^(TaskStop|KillShell)$/.test(u.tool) && !u.isError) ends.set(String(input.task_id ?? input.shell_id ?? ''), 'stopped')
+    }
+  }
+  const now = (await $.clock.now()) / 1000
+  let isChanged = false
+  for (const [id, l] of launches)
+    if (!ends.has(id) && !bg.has(id) && !gone.has(`bg-${id}`)) {
+      bg.set(id, trackOf(now, l.title, { isLate: true, output: l.output }))
+      isChanged = true
+    }
+  for (const [id, t] of bg) {
+    const status = ends.get(id)
+    if (t.endedAt === undefined && status) {
+      Object.assign(t, { endedAt: now, status })
+      isChanged = true
+    }
+  }
+  if (isChanged) await save($)
 }
 
 // A background shell's launch: its result names the task id and the file its output goes to.
@@ -397,8 +437,7 @@ function ask($: EngineInterface, id: string | undefined) {
 // with no ':' ("bg-<id>", "<file id>@<started>"); another chat's rows hidden here are "<chat>:<row>".
 async function syncSelf($: EngineInterface) {
   for (const k of [...gone]) if (!k.includes(':')) gone.delete(k)
-  const now = (await $.clock.now()) / 1000
-  for (const t of lastLive) if (t.type === 'shell' && !bg.has(t.id)) bg.set(t.id, trackOf(now, t.description, { isLate: true }))
+  await reconcile($)
   for (const t of bg.values()) if (t.endedAt === undefined) t.isCounted = undefined // its kind read again from its output
   await save($)
 }
@@ -786,6 +825,7 @@ export const register: Register = on => {
     label = labelOf(folder, first?.text ?? '')
     await $.env.set('CLAUDE_JOB_SESSION', selfId) // the helpers tag what this session launches
     for (const [id, t] of await read($, tasks)) bg.set(id, t) // what ran before this load of the mod
+    await reconcile($) // and what started or ended while it was away
     await $.command.register({ name: 'detaly', description: "Detaly: open the band on the All tab (every chat's jobs)" })
     let isBusy = false
     const run = async () => {
@@ -825,37 +865,6 @@ export const register: Register = on => {
       await save($)
     }
     return ran
-  })
-
-  // Its end: the notification row (<task-id>, <status>) as the session keeps it; one after a turn's end found the
-  // shell gone still names how it ended.
-  on('session.append', async ($, e, next) => {
-    const text = JSON.stringify(e.message.content ?? '')
-    if (text.includes('<task-id>')) {
-      const now = (await $.clock.now()) / 1000
-      for (const [, id = '', status] of text.matchAll(/<task-id>([^<]+)<\/task-id>[\s\S]*?<status>([^<]+)<\/status>/g)) {
-        const t = bg.get(id)
-        if (t && t.status === undefined) Object.assign(t, { endedAt: t.endedAt ?? now, status })
-        if (t && !isTurn) woke.push(id)
-      }
-      await save($)
-    }
-    return next(e)
-  })
-
-  // At a turn's end the engine lists what still runs: adds shells the mod did not see start (a reload), ends the rest.
-  on('classic.Stop', async ($, e, next) => {
-    const live = e.background_tasks
-    if (live) {
-      lastLive = live
-      const now = (await $.clock.now()) / 1000
-      for (const t of live) {
-        if (t.type === 'shell' && !bg.has(t.id) && !gone.has(`bg-${t.id}`)) bg.set(t.id, trackOf(now, t.description, { isLate: true }))
-      }
-      for (const [id, t] of bg) if (t.endedAt === undefined && !live.some(l => l.id === id)) t.endedAt = now
-      await save($)
-    }
-    return next(e)
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -1281,9 +1290,18 @@ export const register: Register = on => {
     return { text: 'Detaly: All tab.' }
   })
 
-  // a new chat's tab is named by its first message
-  on('prompt.submit', ($, e, next) => {
-    if (label === folder) label = labelOf(folder, e.text)
+  // A new chat's tab is named by its first message. A background task's end: its notification, a prompt of its own
+  // (idle, it starts the turn, which is then the task's) or delivered into a running turn.
+  on('prompt.submit', async ($, e, next) => {
+    if (e.origin.kind === 'task-notification' || e.text.includes('<task-id>')) {
+      const now = (await $.clock.now()) / 1000
+      for (const [, id = '', status] of e.text.matchAll(NOTE)) {
+        const t = bg.get(id)
+        if (t && t.status === undefined) Object.assign(t, { endedAt: t.endedAt ?? now, status })
+        if (t && !e.turnId) woke.push(id)
+      }
+      await save($)
+    } else if (label === folder) label = labelOf(folder, e.text)
     return next(e)
   })
 }
