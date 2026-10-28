@@ -156,25 +156,48 @@ function trackOf(now: number, description: string, more: Partial<Bg>): Bg {
 // A background task's end as its notification says it: <task-id>, then <status>.
 const NOTE = /<task-id>([^<]+)<\/task-id>[\s\S]*?<status>([^<]+)<\/status>/g
 
-// What the transcript says of this session's background shells: each launch (a Bash or PowerShell call run in the
-// background, its result naming the id), each end (a notification, a TaskStop or KillShell). Read when the mod loads
-// and at ⟳ Refresh, in place of the list of what still runs that a turn's end (classic.Stop) carried: a security
-// default seated for an organization keeps classic events, and the notifications' rows, from a person's mods. Shells
-// still running that the mod does not follow (missed, or dismissed while running) are followed again, start unknown;
-// followed ones that ended are ended.
+// What the conversation says of this session's background shells, as the model reads it ($.session.messages in its
+// API form: reminders and what came glued to a tool's result included, the last compaction's summary in place of what
+// it replaced): each launch (a Bash or PowerShell call run in the background, its result naming the id), each end (a
+// notification wherever it sits, a TaskStop or KillShell). Read when the mod loads, at ⟳ Refresh and after each turn
+// while a shell runs, in place of the list of what still runs that a turn's end (classic.Stop) carried: a security
+// default seated for an organization keeps classic events, and the notifications' rows, from a person's mods.
+// Shells running that the mod does not follow (missed, or dismissed while running) are followed again, start unknown;
+// followed ones that ended are ended; one followed with its start unknown whose launch the conversation no longer
+// holds, nor its end, is ended too (nothing says it runs: a compaction took both).
+const textOf = (c: unknown): string =>
+  typeof c === 'string'
+    ? c
+    : Array.isArray(c)
+      ? c.map(x => (x && typeof x === 'object' && 'text' in x ? String((x as { text: unknown }).text) : '')).join('\n')
+      : ''
 async function reconcile($: EngineInterface) {
-  const msgs = await $.session.messages().catch(() => [])
+  const msgs = await $.session.messages({ as: 'api' }).catch(() => [])
+  if (!Array.isArray(msgs)) return
+  const asked = new Map<string, string>() // a background launch's tool_use id -> its title
+  const stopping = new Map<string, string>() // a TaskStop's tool_use id -> the task it names
   const launches = new Map<string, { title: string; output?: string }>()
   const ends = new Map<string, string>()
   for (const m of msgs) {
-    for (const [, id = '', status = ''] of m.text.matchAll(NOTE)) ends.set(id, status)
-    for (const u of m.toolUses) {
-      const input = u.input as { run_in_background?: unknown; description?: unknown; command?: unknown; task_id?: unknown; shell_id?: unknown }
-      if (/^(Bash|PowerShell)$/.test(u.tool) && input.run_in_background === true) {
-        const id = /with ID: (\w+)/.exec(u.text ?? '')?.[1]
-        const title = String(input.description ?? '').trim() || String(input.command ?? '').slice(0, 60)
-        if (id) launches.set(id, { title, output: /written to: (.+?\.output)/.exec(u.text ?? '')?.[1] })
-      } else if (/^(TaskStop|KillShell)$/.test(u.tool) && !u.isError) ends.set(String(input.task_id ?? input.shell_id ?? ''), 'stopped')
+    for (const b of m.content) {
+      if (b.type === 'tool_use') {
+        const input = (b.input ?? {}) as { run_in_background?: unknown; description?: unknown; command?: unknown; task_id?: unknown; shell_id?: unknown }
+        const name = String(b.name ?? '')
+        if (/^(Bash|PowerShell)$/.test(name) && input.run_in_background === true)
+          asked.set(String(b.id), String(input.description ?? '').trim() || String(input.command ?? '').slice(0, 60))
+        else if (/^(TaskStop|KillShell)$/.test(name)) stopping.set(String(b.id), String(input.task_id ?? input.shell_id ?? ''))
+        continue
+      }
+      const text = b.type === 'text' ? String(b.text ?? '') : b.type === 'tool_result' ? textOf(b.content) : ''
+      if (b.type === 'tool_result') {
+        const use = String(b.tool_use_id ?? '')
+        const id = /with ID: (\w+)/.exec(text)?.[1]
+        const title = asked.get(use)
+        if (id && title !== undefined) launches.set(id, { title, output: /written to: (.+?\.output)/.exec(text)?.[1] })
+        const stopped = stopping.get(use)
+        if (stopped && b.is_error !== true) ends.set(stopped, 'stopped')
+      }
+      for (const [, id = '', status = ''] of text.matchAll(NOTE)) ends.set(id, status)
     }
   }
   const now = (await $.clock.now()) / 1000
@@ -185,8 +208,9 @@ async function reconcile($: EngineInterface) {
       isChanged = true
     }
   for (const [id, t] of bg) {
-    const status = ends.get(id)
-    if (t.endedAt === undefined && status) {
+    if (t.endedAt !== undefined) continue
+    const status = ends.get(id) ?? (t.isLate && !launches.has(id) ? 'ended' : undefined)
+    if (status) {
       Object.assign(t, { endedAt: now, status })
       isChanged = true
     }
@@ -329,8 +353,9 @@ export function bgRowOf(id: string, t: Bg, now: number, output?: string): Row | 
   const shown = `${t.isLate ? '≥ ' : ''}${clock(el)}`
   if (t.endedAt !== undefined) {
     const isOk = t.status === undefined || t.status === 'completed'
-    const isStop = t.status === 'stopped' || t.status === 'killed'
-    const tail = `${isOk ? 'done in' : `${isStop ? 'stopped' : t.status} after`} ${shown} · ${clockAt(now, t.endedAt - now)}` // and when
+    const isStop = t.status === 'stopped' || t.status === 'killed' || t.status === 'ended' // ended: how, unknown
+    const word = isOk ? 'done in' : `${t.status === 'ended' ? 'ended' : isStop ? 'stopped' : t.status} after`
+    const tail = `${word} ${shown} · ${clockAt(now, t.endedAt - now)}` // and when
     const state = isOk ? 'done' : isStop ? 'stop' : 'fail'
     return { id: `bg-${id}`, title: t.title, f: isOk ? 1 : undefined, counts: '', tail, state, isTimer: !t.isCounted, seen: `bg-${id}` }
   }
@@ -357,7 +382,10 @@ const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCas
 export const isMine = (j: Job, session: string, root: string) =>
   j.session ? j.session === session : j.project ? (norm(j.project) + '/').startsWith(norm(root) + '/') : true
 
-export function rowOf(id: string, j: Job, now: number): Row | undefined {
+// fileAge: s since the file was written. progress_tail rewrites its file every 2 s (it writes `stopped`): one quiet for
+// a minute short of its end is a tail that died, with its job as a rule (killed together): stopped
+export function rowOf(id: string, j: Job, now: number, fileAge = 0): Row | undefined {
+  if (j.stopped === false && !j.finished && fileAge > 60) j = { ...j, stopped: true }
   const updated = j.updated ?? now
   const age = now - updated
   const seen = j.finished || j.stopped ? `${id}@${j.started}` : undefined
@@ -495,7 +523,7 @@ async function tick($: EngineInterface, dir: string, root: string) {
     const isEnded = job.finished || job.stopped
     if (!isEnded && now - f.mtimeMs / 1000 > KEEP_S) continue
     if (isEnded) await seenOf($, `${id}@${job.started}`)
-    const row = rowOf(id, job, now)
+    const row = rowOf(id, job, now, now - f.mtimeMs / 1000)
     if (row && !gone.has(`${id}@${job.started}`)) files.push({ id, job, row })
   }
   // the caches keep only what is still listed
@@ -1243,6 +1271,8 @@ export const register: Register = on => {
   on('turn.complete', ($, e, next) => {
     isTurn = false
     turnOf = []
+    // a notification delivered into the turn came glued to a tool's result: no prompt of its own
+    if (!e.agentId && [...bg.values()].some(t => t.endedAt === undefined)) void reconcile($).then(() => runNow?.())
     return next(e)
   })
 

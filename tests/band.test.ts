@@ -57,14 +57,15 @@ function world(
   })
   on('session.id', () => ({ value: 's1' }))
   on('session.root', () => ({ value: 'D:\\dev\\game\\.claude\\worktrees\\brave-x' }))
-  // the transcript: the first rows, then what a test adds (`transcript`)
+  // the transcript's rows, and the conversation in API form: what a test adds (`transcript`)
   const transcript: unknown[] = []
-  on('session.messages', () => ({
-    value: [
-      { role: 'user', text: 'You are operating in a git worktree.', toolUses: [] }, // the engine's own row
-      { role: 'user', text: '<system-reminder>notes</system-reminder>train the walking net', toolUses: [] },
-      ...transcript,
-    ],
+  on('session.messages', ($, e) => ({
+    value: (e as { as?: string }).as === 'api'
+      ? transcript
+      : [
+          { role: 'user', text: 'You are operating in a git worktree.', toolUses: [] }, // the engine's own row
+          { role: 'user', text: '<system-reminder>notes</system-reminder>train the walking net', toolUses: [] },
+        ],
   }) as never)
   on('prompt.submit', ($, e) => ({ text: e.text }))
   on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -91,11 +92,15 @@ function world(
 // A background task's notification, as the engine submits it
 const notify = ($: { prompt: { submit: (e: never) => Promise<unknown> } }, id: string, status = 'completed') =>
   $.prompt.submit({ text: `<task-notification><task-id>${id}</task-id><status>${status}</status></task-notification>`, origin: { kind: 'task-notification' }, wait: false } as never)
-// A transcript's row for a shell Claude ran in the background
-const launchRow = (id: string, description: string) => ({
-  role: 'assistant',
-  text: '',
-  toolUses: [{ tool_use_id: `u-${id}`, tool: 'Bash', input: { command: 'x', description, run_in_background: true }, text: `Command running in background with ID: ${id}. Output is being written to: C:\\T\\tasks\\${id}.output` }],
+// The conversation (API form) of a shell Claude ran in the background: its call, and the result naming its id
+const launchRow = (id: string, description: string) => [
+  { role: 'assistant', content: [{ type: 'tool_use', id: `u-${id}`, name: 'Bash', input: { command: 'x', description, run_in_background: true } }] },
+  { role: 'user', content: [{ type: 'tool_result', tool_use_id: `u-${id}`, content: `Command running in background with ID: ${id}. Output is being written to: C:\\T\\tasks\\${id}.output` }] },
+]
+// a notification delivered into a turn: glued to another tool's result, as a reminder
+const gluedNote = (id: string) => ({
+  role: 'user',
+  content: [{ type: 'tool_result', tool_use_id: 'u-other', content: [{ type: 'text', text: 'ok' }, { type: 'text', text: `[SYSTEM NOTIFICATION - NOT USER INPUT] <task-notification><task-id>${id}</task-id><status>completed</status></task-notification>` }] }],
 })
 
 test('own session and own project only; bar, percent, counts, ETA; stalled; stopped; old finished dropped', async ($, on) => {
@@ -184,8 +189,7 @@ test('background shells: timer against the described estimate, progress from out
   // missed while the mod was away (a reload): the transcript has two more shells running and bbb222's end; ⟳ Refresh
   // reads it, follows the two (start unknown), ends bbb222, and takes the finished rows
   const later = hm(T0 + 1800)
-  transcript.push(launchRow('ccc333', 'Render video'), launchRow('eee555', `train7 check at ~${later}`))
-  transcript.push({ role: 'user', text: '<task-notification><task-id>bbb222</task-id><status>completed</status></task-notification>', toolUses: [] })
+  transcript.push(...launchRow('ccc333', 'Render video'), ...launchRow('eee555', `train7 check at ~${later}`), gluedNote('bbb222'))
   await ui.press({ key: 'refresh:s1' })
   await clock.advance(2000)
   expect((await ui.find({ key: 'bg-ccc333' }))?.text).toContain('≥ <1 min')
@@ -458,7 +462,7 @@ test("tabs: this chat, All, and another chat that publishes its jobs; a tab's Cl
   // a running shell this chat stopped following comes back with its tab's Refresh; All's Refresh brings the closed tab
   await $.tool.call({ tool: 'Bash', command: 'sleep 99', description: 'Bake lightmaps', run_in_background: true })
   await clock.advance(12_000)
-  transcript.push(launchRow('t1', 'Bake lightmaps'))
+  transcript.push(...launchRow('t1', 'Bake lightmaps'))
   await ui.press({ key: 'x-bg-t1' })
   await ui.press({ key: 'yes-bg-t1' })
   expect(await ui.find({ key: 'bg-t1' })).toBeUndefined()
@@ -500,6 +504,28 @@ test("a tab's Refresh takes its finished rows; on another chat's tab it asks tha
   expect(await ui.find({ key: 's2:bg-r2' })).toBeUndefined()
   expect(await ui.find({ key: 's2:bg-r1' })).toBeDefined()
   expect(stored['sync:s2']).toBeDefined()
+})
+
+test('an end glued into a turn is read after it; a shell followed blind that the conversation no longer holds ends', async ($, on) => {
+  const { clock, transcript } = world(on, () => ({}))
+  on('tool.call', () => ({ result: {} as never, text: 'Command running in background with ID: g1. Output is being written to: C:\\T\\tasks\\g1.output' }))
+  // followed before a reload, start unknown, and gone from the conversation (a compaction took its launch)
+  const kept = [['old1', { title: 'Hover test', started: T0 - 600, isLate: true }]]
+  let isRead = false // the load reads it once; later reads see what the mod wrote
+  on('state.get', ($, e, next) => (e.key === 'tasks' && !isRead && (isRead = true) ? { value: { value: kept, version: 0 } } : next(e)) as never)
+  on('turn.complete', () => ({ text: '' }) as never)
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  await $.tool.call({ tool: 'Bash', command: 'sleep 60', description: 'Wait for the eval', run_in_background: true })
+  transcript.push(...launchRow('g1', 'Wait for the eval'))
+  await clock.advance(30_000)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect((await ui.find({ key: 'bg-old1' }))?.text).toContain('ended after')
+  expect((await ui.find({ key: 'bg-g1' }))?.text).toContain('<1 min') // still running
+  // its notification came glued to another tool's result, inside a turn: read once the turn ends
+  transcript.push(gluedNote('g1'))
+  await $.turn.complete({ turnId: 't1', answer: '', durationMs: 1, isAborted: false } as never)
+  await clock.advance(2000)
+  expect((await ui.find({ key: 'bg-g1' }))?.text).toContain('done in 0:30')
 })
 
 test("the chats' tabs shrink their names to share the row between All and ⓘ Info", async ($, on) => {
