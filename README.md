@@ -125,6 +125,7 @@ stays one strip: the tab row, ⓘ Info and ▾ Minimize (`/detaly` opens All).
 
 Hover the line for the details (context size, when each limit resets, cache reads and writes, session length).
 **⟳ Refresh** there refreshes this chat; **▴ Tabs** brings the tabs back. Minimized, the line stays even with no jobs.
+A chat opens minimized when the app starts; within a session it keeps the tab and mode you left it in.
 
 On the tab row, **ⓘ Info** (left of Minimize) shows the same figures and details in a card; press it to pin the card.
 

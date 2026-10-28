@@ -852,6 +852,14 @@ export const register: Register = on => {
     const first = (await $.session.messages().catch(() => [])).find(m => m.role === 'user' && promptOf(m.text))
     label = labelOf(folder, first?.text ?? '')
     await $.env.set('CLAUDE_JOB_SESSION', selfId) // the helpers tag what this session launches
+    // A chat's process that starts afresh (the app opened again) opens the band minimized on this chat; a reload of the
+    // mod in the same process keeps the tab and the mode it had (session state). The process's environment tells the
+    // two apart: what the mod set there outlives a reload, not a restart.
+    if (!(await $.env.get('DETALY_RUN'))) {
+      await update($, miniAtom, () => true)
+      await update($, tabAtom, () => '')
+      await $.env.set('DETALY_RUN', '1')
+    }
     for (const [id, t] of await read($, tasks)) bg.set(id, t) // what ran before this load of the mod
     await reconcile($) // and what started or ended while it was away
     await $.command.register({ name: 'detaly', description: "Detaly: open the band on the All tab (every chat's jobs)" })

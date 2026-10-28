@@ -32,7 +32,8 @@ function world(
   vars: Record<string, string> = {},
 ) {
   const clock = mock.clock(on, { now: T0 * 1000 })
-  mock.env(on, { USERPROFILE: 'C:\\Users\\u', ...vars })
+  // DETALY_RUN set: the mod reloaded in a running chat (a fresh one opens minimized)
+  mock.env(on, { USERPROFILE: 'C:\\Users\\u', DETALY_RUN: '1', ...vars })
   const env: Record<string, string | undefined> = {}
   const written: Record<string, string> = {}
   const stored: Record<string, unknown> = {}
@@ -545,6 +546,16 @@ test("the chats' tabs shrink their names to share the row between All and ⓘ In
   for (const t of await names(200)) expect(t).toBe('website · render the tr…') // room: 24 letters each, the … one
   const narrow = await names(100) // 5 named tabs: (100 - 24 - 9 - 5 * 6) / 5 = 7
   for (const t of narrow) expect(t).toBe('websit…')
+})
+
+test("a chat's process started afresh opens the band minimized on this chat; a reload keeps its tab and mode", async ($, on) => {
+  const { clock, env } = world(on, () => ({ 'a.json': { title: 'Resize images', done: 5, total: 10, updated: T0, started: T0 - 10, session: 's1' } }), () => '', () => ({}), { DETALY_RUN: '' })
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  expect(await ui.find({ key: 'expand' })).toBeDefined() // ▴ Tabs: minimized
+  expect(await ui.find({ key: 'tab:all' })).toBeUndefined()
+  expect(env.DETALY_RUN).toBe('1') // a reload in this process now keeps what is open
 })
 
 test('minimized: this chat alone, no tabs; ▴ brings them back', async ($, on) => {
