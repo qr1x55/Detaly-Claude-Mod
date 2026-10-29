@@ -398,7 +398,7 @@ test('a name is one line; one too long for its column shows whole in a card whil
   expect(cards[0]?.text).toBe(long)
 })
 
-test('a ✕ in place of the icon on hover: a finished row leaves at once, a running one after "stop tracking? yes"', async ($, on) => {
+test('a ✖ at the row's end on hover: a finished row leaves at once, a running one after "stop tracking? yes"', async ($, on) => {
   const { clock } = world(on, () => ({
     'run.json': { title: 'running', done: 1, total: 2, updated: T0, started: T0 - 10 },
     'old.json': { title: 'finished', done: 2, total: 2, updated: T0, started: T0 - 60, finished: true },
