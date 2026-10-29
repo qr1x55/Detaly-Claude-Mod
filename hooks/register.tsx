@@ -750,7 +750,7 @@ const ICON = { run: '●', stale: '◌', done: '✓', fail: '✕', stop: '■' }
 // a bar that fills its column is cells * this. Another zoom leaves the bar a little short or long of its column.
 const CELL_PX = 7.85
 const ICON_W = 3 // the icon cell, in cells
-const X_GROW = 2 // what the ✖ that takes the icon's place needs more, in cells, borrowed from the gap after it
+const X_GROW = 2 // what the ✖ that takes the icon's place needs more, in cells (even: half each side)
 // ponytail: a desktop draws a name in a proportional bold face, so whether it is cut is a guess at its width by letter
 // class (fitted to names seen cut or whole in a 17-cell column); a wrong guess shows the whole-name card on a name that
 // fits, or none on one cut by a letter. The terminal counts cells.
@@ -1049,9 +1049,10 @@ export const register: Register = on => {
             and the hidden ✖ before the icon, as wide as the cell, is revealed and sends the icon to the line below,
             out of sight. The ✖ needs X_GROW cells more than the icon: a desktop's plain button has 6 px of padding
             each side, and its cells are ~5.4 px (measured 2026-10-29), so in the icon's 3 the ✖ was cut to a sliver.
-            The cell takes them out of the gap after it (a margin as much back): the icon and the name stay put. This
+            The cell grows a cell to the left (into the band's edge) and one into the gap after it, margins as much
+            back, so its middle, where the ✖ is centred, is the icon's: the icon and the name stay put. This
             chat's finished row leaves at once, its running one after "stop tracking?"; another chat's is hidden here. */}
-        <Box width={ICON_W + X_GROW} marginRight={-X_GROW} height={1} flexShrink={0} flexDirection="row" flexWrap="wrap" overflow="hidden">
+        <Box width={ICON_W + X_GROW} marginLeft={-X_GROW / 2} marginRight={-X_GROW / 2} height={1} flexShrink={0} flexDirection="row" flexWrap="wrap" overflow="hidden">
           <Box width={ICON_W + X_GROW} minWidth={ICON_W + X_GROW} flexShrink={0} justifyContent="center" display="none" hover={{ display: 'flex' }}>
             {/* a desktop draws its own button, child colours ignored: the label's colour goes through hover */}
             <Button
@@ -1062,7 +1063,7 @@ export const register: Register = on => {
               onPress={() => (g.isSelf && !isOver(r) ? ask($, r.id) : dismiss($, g.id, r.id))}
             />
           </Box>
-          <Box width={ICON_W} minWidth={ICON_W} height={1} flexShrink={0} alignItems="center" justifyContent="center">
+          <Box width={ICON_W} minWidth={ICON_W} marginLeft={X_GROW / 2} height={1} flexShrink={0} alignItems="center" justifyContent="center">
             {icon(r)}
           </Box>
         </Box>
