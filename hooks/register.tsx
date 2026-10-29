@@ -749,7 +749,8 @@ const ICON = { run: '●', stale: '◌', done: '✓', fail: '✕', stop: '■' }
 // ponytail: the desktop draws cells ~7.85 px wide (measured on Windows 11 at 100 % zoom); an SVG is sized in px, so
 // a bar that fills its column is cells * this. Another zoom leaves the bar a little short or long of its column.
 const CELL_PX = 7.85
-const ICON_W = 3 // the icon cell, in cells: room for a desktop's native button when the × replaces the icon
+const ICON_W = 3 // the icon cell, in cells
+const X_GROW = 2 // what the ✖ that takes the icon's place needs more, in cells, borrowed from the gap after it
 // ponytail: a desktop draws a name in a proportional bold face, so whether it is cut is a guess at its width by letter
 // class (fitted to names seen cut or whole in a 17-cell column); a wrong guess shows the whole-name card on a name that
 // fits, or none on one cut by a letter. The terminal counts cells.
@@ -1046,11 +1047,12 @@ export const register: Register = on => {
       <Box key={keyOf(g, r)} flexDirection="row" alignItems="center" gap={2} height={rowH}>
         {/* hovered (the row's Box is the scope), a ✖ takes the icon's place: the cell is one line, wraps and clips,
             and the hidden ✖ before the icon, as wide as the cell, is revealed and sends the icon to the line below,
-            out of sight. Neither may shrink: a desktop that lays buttons out to fit squeezed the two into the one
-            cell, the ✖ to a sliver. This chat's finished row leaves at once, its running one after "stop tracking?";
-            another chat's is hidden here. */}
-        <Box width={ICON_W} height={1} flexShrink={0} flexDirection="row" flexWrap="wrap" overflow="hidden">
-          <Box width={ICON_W} minWidth={ICON_W} flexShrink={0} justifyContent="center" display="none" hover={{ display: 'flex' }}>
+            out of sight. The ✖ needs X_GROW cells more than the icon: a desktop's plain button has 6 px of padding
+            each side, and its cells are ~5.4 px (measured 2026-10-29), so in the icon's 3 the ✖ was cut to a sliver.
+            The cell takes them out of the gap after it (a margin as much back): the icon and the name stay put. This
+            chat's finished row leaves at once, its running one after "stop tracking?"; another chat's is hidden here. */}
+        <Box width={ICON_W + X_GROW} marginRight={-X_GROW} height={1} flexShrink={0} flexDirection="row" flexWrap="wrap" overflow="hidden">
+          <Box width={ICON_W + X_GROW} minWidth={ICON_W + X_GROW} flexShrink={0} justifyContent="center" display="none" hover={{ display: 'flex' }}>
             {/* a desktop draws its own button, child colours ignored: the label's colour goes through hover */}
             <Button
               key={`x-${keyOf(g, r)}`}
