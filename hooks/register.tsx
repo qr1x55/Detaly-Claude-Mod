@@ -154,7 +154,11 @@ function trackOf(now: number, description: string, more: Partial<Bg>): Bg {
 }
 
 // A background task's end as its notification says it: <task-id>, then <status>.
-const NOTE = /<task-id>([^<]+)<\/task-id>[\s\S]*?<status>([^<]+)<\/status>/g
+// One notification may name many tasks under one status: the engine's note after a restart lists every shell the
+// previous run left unfinished ("<task-id>a</task-id><task-id>b</task-id>…<status>stopped</status>").
+const NOTE = /((?:<task-id>[^<]+<\/task-id>\s*)+)[\s\S]*?<status>([^<]+)<\/status>/g
+export const endsIn = (text: string) =>
+  [...text.matchAll(NOTE)].flatMap(([, ids = '', status = '']) => [...ids.matchAll(/<task-id>([^<]+)<\/task-id>/g)].map(([, id = '']) => [id, status] as const))
 
 // What the conversation says of this session's background shells, as the model reads it ($.session.messages in its
 // API form: reminders and what came glued to a tool's result included, the last compaction's summary in place of what
@@ -197,7 +201,7 @@ async function reconcile($: EngineInterface) {
         const stopped = stopping.get(use)
         if (stopped && b.is_error !== true) ends.set(stopped, 'stopped')
       }
-      for (const [, id = '', status = ''] of text.matchAll(NOTE)) ends.set(id, status)
+      for (const [id, status] of endsIn(text)) ends.set(id, status)
     }
   }
   const now = (await $.clock.now()) / 1000
@@ -1339,7 +1343,7 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e, next) => {
     if (e.origin.kind === 'task-notification' || e.text.includes('<task-id>')) {
       const now = (await $.clock.now()) / 1000
-      for (const [, id = '', status] of e.text.matchAll(NOTE)) {
+      for (const [id, status] of endsIn(e.text)) {
         const t = bg.get(id)
         if (t && t.status === undefined) Object.assign(t, { endedAt: t.endedAt ?? now, status })
         if (t && !e.turnId) woke.push(id)

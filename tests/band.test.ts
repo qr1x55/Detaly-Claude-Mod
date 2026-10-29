@@ -1,7 +1,7 @@
 import type { On } from 'claude-code'
 import { expect, mock, test } from 'claude-code/testing'
 
-import { bgRowOf, chargesOf, leftAt, spentText, untilOf } from '../hooks/register'
+import { bgRowOf, chargesOf, endsIn, leftAt, spentText, untilOf } from '../hooks/register'
 
 // local "HH:MM" of unix second t, as the band writes it
 const hm = (t: number) => new Date(t * 1000).toTimeString().slice(0, 5)
@@ -218,6 +218,13 @@ test('ETA from the rate when the job gives none; without jobs the tab row alone'
   await clock.advance(10_000)
   expect((await ui.find({ type: 'Svg' }))?.props.alt).toBe('20 %  20 / 100 it')
   expect((await ui.find({ key: 'job' }))?.text).toContain('2 min left')
+})
+
+test("a notification's status ends every task it names, the engine's note after a restart included", () => {
+  expect(endsIn('<task-notification><task-id>a1</task-id><status>completed</status></task-notification>')).toEqual([['a1', 'completed']])
+  const orphans = '<task-notification>\n<task-id>b1</task-id>\n<task-id>b2</task-id>\n<task-id>__orphan_summary__:shell</task-id>\n<status>stopped</status>\n<summary>3 background shell command tasks did not finish</summary></task-notification>'
+  expect(endsIn(orphans)).toEqual([['b1', 'stopped'], ['b2', 'stopped'], ['__orphan_summary__:shell', 'stopped']])
+  expect(endsIn(`${orphans} <task-notification><task-id>c1</task-id><status>failed</status></task-notification>`).at(-1)).toEqual(['c1', 'failed'])
 })
 
 test('the end time names a later day', () => {
