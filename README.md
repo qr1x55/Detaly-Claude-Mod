@@ -93,7 +93,7 @@ stays one strip: the tab row, ⓘ Info and ▾ Minimize (`/detaly` opens All).
 
 ### Rows
 
-- **Hover a row:** a ✖ shows at its end. On a finished row it removes the row at once; on a running one it
+- **Hover a row:** its icon turns into a red ✖. On a finished row it removes the row at once; on a running one it
   asks *Stop tracking this job? It keeps running.* — **Yes** drops it from the band (the job goes on), **No** keeps
   it. Another chat's row is hidden here only.
 - **Hover a cut name** to see it whole.

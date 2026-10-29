@@ -749,8 +749,7 @@ const ICON = { run: '●', stale: '◌', done: '✓', fail: '✕', stop: '■' }
 // ponytail: the desktop draws cells ~7.85 px wide (measured on Windows 11 at 100 % zoom); an SVG is sized in px, so
 // a bar that fills its column is cells * this. Another zoom leaves the bar a little short or long of its column.
 const CELL_PX = 7.85
-const ICON_W = 3 // the icon cell, in cells
-const X_W = 3 // the ✖'s cell at a row's end, in cells
+const ICON_W = 3 // the icon cell, in cells: room for a desktop's native button when the × replaces the icon
 // ponytail: a desktop draws a name in a proportional bold face, so whether it is cut is a guess at its width by letter
 // class (fitted to names seen cut or whole in a 17-cell column); a wrong guess shows the whole-name card on a name that
 // fits, or none on one cut by a letter. The terminal counts cells.
@@ -985,7 +984,7 @@ export const register: Register = on => {
     }
     if (cur.length) pages.push(cur)
     const hasMore = pages.length > 1
-    const barW = Math.max(16, e.props.bodyColumns - ICON_W - nameW - tailW - X_W - 2 * 4 - (hasMore ? 3 : 0))
+    const barW = Math.max(16, e.props.bodyColumns - ICON_W - nameW - tailW - 2 * 3 - (hasMore ? 3 : 0))
     const px = Math.floor(barW * CELL_PX) - 2
     const icon = (r: Row) => {
       if (!r.isTimer || r.state !== 'run') return <Text color={COLOR[r.state]}>{ICON[r.state]}</Text>
@@ -1045,8 +1044,25 @@ export const register: Register = on => {
     const keyOf = (g: Group, r: Row) => (g.isSelf ? r.id : `${g.id}:${r.id}`)
     const rowView = (g: Group, r: Row) => (
       <Box key={keyOf(g, r)} flexDirection="row" alignItems="center" gap={2} height={rowH}>
-        <Box width={ICON_W} flexShrink={0} alignItems="center" justifyContent="center">
-          {icon(r)}
+        {/* hovered (the row's Box is the scope), a ✖ takes the icon's place: the cell is one line, wraps and clips,
+            and the hidden ✖ before the icon, as wide as the cell, is revealed and sends the icon to the line below,
+            out of sight. Neither may shrink: a desktop that lays buttons out to fit squeezed the two into the one
+            cell, the ✖ to a sliver. This chat's finished row leaves at once, its running one after "stop tracking?";
+            another chat's is hidden here. */}
+        <Box width={ICON_W} height={1} flexShrink={0} flexDirection="row" flexWrap="wrap" overflow="hidden">
+          <Box width={ICON_W} minWidth={ICON_W} flexShrink={0} justifyContent="center" display="none" hover={{ display: 'flex' }}>
+            {/* a desktop draws its own button, child colours ignored: the label's colour goes through hover */}
+            <Button
+              key={`x-${keyOf(g, r)}`}
+              plain
+              label="✖"
+              hover={{ color: 'error', bold: true }}
+              onPress={() => (g.isSelf && !isOver(r) ? ask($, r.id) : dismiss($, g.id, r.id))}
+            />
+          </Box>
+          <Box width={ICON_W} minWidth={ICON_W} height={1} flexShrink={0} alignItems="center" justifyContent="center">
+            {icon(r)}
+          </Box>
         </Box>
         {/* hovered, a cut name shows whole, and the bar the job's run and spend, in cards the desktop lifts above them
             (the band clips what it draws) */}
@@ -1084,21 +1100,6 @@ export const register: Register = on => {
           <Text color={r.state === 'run' ? undefined : COLOR[r.state]} dimColor={r.state === 'run'} wrap="truncate-end">
             {r.tail}
           </Text>
-        </Box>
-        {/* hovered (the row's Box is the scope), a ✖ in a cell of its own at the end, empty till then: this chat's
-            finished row leaves at once, its running one after "stop tracking?"; another chat's is hidden here. The ✖
-            once took the icon's place by being clipped in its cell; a desktop that sized buttons anew cut it to a sliver */}
-        <Box width={X_W} flexShrink={0} justifyContent="center">
-          <Box display="none" hover={{ display: 'flex' }}>
-            {/* a desktop draws its own button, child colours ignored: the label's colour goes through hover */}
-            <Button
-              key={`x-${keyOf(g, r)}`}
-              plain
-              label="✖"
-              hover={{ color: 'error', bold: true }}
-              onPress={() => (g.isSelf && !isOver(r) ? ask($, r.id) : dismiss($, g.id, r.id))}
-            />
-          </Box>
         </Box>
       </Box>
     )
