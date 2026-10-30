@@ -281,6 +281,9 @@ let isHere = false // the person at Claude at the last sample
 let isWindows = false
 let watchFailed = false // no sample ever came: the wall clock serves
 let watchTried = 0
+let watching = false // this module's watcher runs: never two
+let watcherPid: number | undefined // its PowerShell, which a stop file ends
+const SPAWN_AFTER_S = 120 // a clock gone quiet this long starts a watcher here (another chat's may be just slow)
 const PRESENCE_PS =
   `Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class DetalyIdle { ` +
   `[StructLayout(LayoutKind.Sequential)] public struct L { public uint Size; public uint Time; } ` +
@@ -289,19 +292,32 @@ const PRESENCE_PS =
   `public static string Now() { L l = new L(); l.Size = 8; GetLastInputInfo(ref l); uint idle = unchecked((uint)Environment.TickCount - l.Time) / 1000; ` +
   `uint p; GetWindowThreadProcessId(GetForegroundWindow(), out p); string n = ""; ` +
   `try { n = System.Diagnostics.Process.GetProcessById((int)p).ProcessName; } catch { } return idle + " " + n; } }'\n` +
-  `while ($true) { [DetalyIdle]::Now(); Start-Sleep ${PRESENCE_EVERY_S} }\n`
-// The watcher: "<idle s> <process in front>" a line; written to the store while no other chat's watcher is live.
-// ponytail: a watcher that yields to another breaks its loop and leaves its child to the runtime; should it run on,
-// it is an idle PowerShell (~70 MB) until the chat ends.
+  // it ends itself: its stop file there (DETALY_STOP: the mod gave up listening), its chat gone, or 4 h old
+  `$par = (Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId; $stop = Join-Path $env:DETALY_STOP "presence-stop-$PID"; $t0 = Get-Date; "pid $PID"\n` +
+  `while ($true) { [DetalyIdle]::Now(); Start-Sleep ${PRESENCE_EVERY_S}; if ((Test-Path $stop) -or -not (Get-Process -Id $par -ErrorAction SilentlyContinue) -or ((Get-Date) - $t0).TotalHours -gt 4) { Remove-Item $stop -ErrorAction SilentlyContinue; exit } }\n`
+// The watcher: "pid <n>" first, then "<idle s> <process in front>" a line; written to the store while no other
+// chat's watcher is live. Leaving the loop should end the child, and on Windows it did not: a watcher that yielded
+// left its PowerShell running, one a minute in a chat that did not own the clock, 909 by an evening (~63 MB each,
+// 2026-10-30). So the child ends itself as well: its stop file, its chat gone, or 4 h old.
+const stopWatcher = ($: EngineInterface, pid: number | undefined) =>
+  pid ? $.fs.write(`${progressDir}/presence-stop-${pid}`, '').catch(() => {}) : Promise.resolve()
 async function watch($: EngineInterface) {
   let samples = 0
+  watching = true
   try {
     let rest = ''
     const argv = ['powershell', '-NoProfile', '-NonInteractive', '-Command', '-']
-    for await (const { stream, text } of $.process.spawn({ argv, input: PRESENCE_PS })) {
+    for await (const { stream, text } of $.process.spawn({ argv, input: PRESENCE_PS, env: { DETALY_STOP: progressDir } })) {
       if (stream !== 'stdout') continue
       const lines = (rest + text).split('\n')
       rest = lines.pop() ?? ''
+      for (const l of lines) {
+        const pid = /^pid (\d+)/.exec(l.trim())?.[1]
+        if (pid) {
+          watcherPid = Number(pid)
+          await update($, watcherAtom, () => watcherPid ?? 0)
+        }
+      }
       const m = lines.map(l => /^(\d+) (\S*)/.exec(l.trim())).filter(x => x !== null).pop()
       if (!m) continue
       samples += 1
@@ -315,6 +331,9 @@ async function watch($: EngineInterface) {
   } catch {
     // no PowerShell, or it failed
   }
+  await stopWatcher($, watcherPid)
+  watcherPid = undefined
+  watching = false
   if (!samples) watchFailed = true
 }
 // whether a row that ended at `endedAt` (wall s) after `ran` s, first seen at `seen` on the presence clock, still
@@ -511,7 +530,7 @@ async function tick($: EngineInterface, dir: string, root: string) {
   const wasHere = isHere
   isHere = activeNow !== undefined && pr?.here === true
   if (isHere && !wasHere) $.ui.invalidate('ui.render') // back at Claude: what the band shows now is seen
-  if (activeNow === undefined && isWindows && !demo && now - watchTried > 60) {
+  if (activeNow === undefined && isWindows && !demo && !watching && !(pr && now - pr.at < SPAWN_AFTER_S) && now - watchTried > 60) {
     watchTried = now
     void watch($)
   }
@@ -692,6 +711,7 @@ const LEVEL = [
 const levelOf = (pct: number) => LEVEL.find(([from]) => pct >= from) ?? LEVEL[2]
 const tokensAtom = atom({ plugin: 'detaly', key: 'tokens' } as const, { since: 0, in: 0, cacheRead: 0, cacheWrite: 0, out: 0 })
 const jobSpentAtom = atom({ plugin: 'detaly', key: 'jobSpent' } as const, {} as Record<string, Spent>)
+const watcherAtom = atom({ plugin: 'detaly', key: 'watcher' } as const, 0) // the presence watcher's PowerShell pid
 let ownJobs: string[] = [] // this chat's file jobs, "<id>@<started>", as the last tick listed them
 const big = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : `${n}`)
 const LIMIT = { five_hour: ['5h', '5-hour limit'], seven_day: ['week', 'Weekly limit'], spend_limit: ['spend', 'Spend limit'] } as const
@@ -866,6 +886,7 @@ export const register: Register = on => {
       await $.env.set('DETALY_RUN', '1')
     }
     for (const [id, t] of await read($, tasks)) bg.set(id, t) // what ran before this load of the mod
+    await stopWatcher($, (await read($, watcherAtom)) || undefined) // and the previous load's watcher goes
     await reconcile($) // and what started or ended while it was away
     await $.command.register({ name: 'detaly', description: "Detaly: open the band on the All tab (every chat's jobs)" })
     let isBusy = false

@@ -32,6 +32,7 @@ declare module 'claude-code' {
       mini: boolean
       tokens: { since: number; in: number; cacheRead: number; cacheWrite: number; out: number }
       jobSpent: Record<string, Spent>
+      watcher: number // the presence watcher's PowerShell pid (0: none), ended by a stop file at the next load
     }
   }
 }
