@@ -175,13 +175,47 @@ const textOf = (c: unknown): string =>
     : Array.isArray(c)
       ? c.map(x => (x && typeof x === 'object' && 'text' in x ? String((x as { text: unknown }).text) : '')).join('\n')
       : ''
-async function reconcile($: EngineInterface) {
+// A subagent's shells end in its own conversation (its notifications are delivered there), read by its id; one whose
+// conversation can no longer be read (the agent is gone) leaves its shells nothing to say they run: they end.
+// `isAsked` (⟳ Refresh): the session's other agents are read as well, and a running shell no conversation launched
+// ends too, so one followed before the mod knew whose it was cannot hang; not done unasked, since a compaction takes
+// the launch of a shell that still runs.
+async function reconcile($: EngineInterface, isAsked = false) {
   const msgs = await $.session.messages({ as: 'api' }).catch(() => [])
   if (!Array.isArray(msgs)) return
-  const asked = new Map<string, string>() // a background launch's tool_use id -> its title
-  const stopping = new Map<string, string>() // a TaskStop's tool_use id -> the task it names
   const launches = new Map<string, { title: string; output?: string }>()
   const ends = new Map<string, string>()
+  scan(msgs, launches, ends)
+  const goneAgents = new Set<string>()
+  const agents = new Set([...bg.values()].flatMap(t => (t.endedAt === undefined && t.agentId ? [t.agentId] : [])))
+  if (isAsked) for (const a of await $.agent.list().catch(() => [])) agents.add(a.id)
+  for (const agentId of agents) {
+    const its = await $.session.messages({ as: 'api', agentId }).catch(() => undefined)
+    if (Array.isArray(its)) scan(its, launches, ends)
+    else goneAgents.add(agentId)
+  }
+  const now = (await $.clock.now()) / 1000
+  let isChanged = false
+  for (const [id, l] of launches)
+    if (!ends.has(id) && !bg.has(id) && !gone.has(`bg-${id}`)) {
+      bg.set(id, trackOf(now, l.title, { isLate: true, output: l.output }))
+      isChanged = true
+    }
+  for (const [id, t] of bg) {
+    if (t.endedAt !== undefined) continue
+    const isBlind = ((t.isLate || isAsked) && !launches.has(id)) || (t.agentId !== undefined && goneAgents.has(t.agentId))
+    const status = ends.get(id) ?? (isBlind ? 'ended' : undefined)
+    if (status) {
+      Object.assign(t, { endedAt: now, status })
+      isChanged = true
+    }
+  }
+  if (isChanged) await save($)
+}
+// One conversation's launches and ends, added to the maps.
+function scan(msgs: { content: { type: string; [k: string]: unknown }[] }[], launches: Map<string, { title: string; output?: string }>, ends: Map<string, string>) {
+  const asked = new Map<string, string>() // a background launch's tool_use id -> its title
+  const stopping = new Map<string, string>() // a TaskStop's tool_use id -> the task it names
   for (const m of msgs) {
     for (const b of m.content) {
       if (b.type === 'tool_use') {
@@ -204,22 +238,6 @@ async function reconcile($: EngineInterface) {
       for (const [id, status] of endsIn(text)) ends.set(id, status)
     }
   }
-  const now = (await $.clock.now()) / 1000
-  let isChanged = false
-  for (const [id, l] of launches)
-    if (!ends.has(id) && !bg.has(id) && !gone.has(`bg-${id}`)) {
-      bg.set(id, trackOf(now, l.title, { isLate: true, output: l.output }))
-      isChanged = true
-    }
-  for (const [id, t] of bg) {
-    if (t.endedAt !== undefined) continue
-    const status = ends.get(id) ?? (t.isLate && !launches.has(id) ? 'ended' : undefined)
-    if (status) {
-      Object.assign(t, { endedAt: now, status })
-      isChanged = true
-    }
-  }
-  if (isChanged) await save($)
 }
 
 // A background shell's launch: its result names the task id and the file its output goes to.
@@ -488,7 +506,7 @@ function ask($: EngineInterface, id: string | undefined) {
 // with no ':' ("bg-<id>", "<file id>@<started>"); another chat's rows hidden here are "<chat>:<row>".
 async function syncSelf($: EngineInterface) {
   for (const k of [...gone]) if (!k.includes(':')) gone.delete(k)
-  await reconcile($)
+  await reconcile($, true)
   for (const t of bg.values()) if (t.endedAt === undefined) t.isCounted = undefined // its kind read again from its output
   await save($)
 }
@@ -911,6 +929,7 @@ export const register: Register = on => {
     if (e.run_in_background) {
       const id = launched((await $.clock.now()) / 1000, e.description, e.command, ran.text)
       const t = id ? bg.get(id) : undefined
+      if (t && e.agentId) t.agentId = e.agentId // a subagent's: its end comes to its conversation
       if (id && launchedInStep) launchedInStep.push(id)
       else if (t && launchShare) t.spent = plus(t.spent, launchShare)
       await save($)
@@ -1310,7 +1329,7 @@ export const register: Register = on => {
     isTurn = false
     turnOf = []
     // a notification delivered into the turn came glued to a tool's result: no prompt of its own
-    if (!e.agentId && [...bg.values()].some(t => t.endedAt === undefined)) void reconcile($).then(() => runNow?.())
+    if ([...bg.values()].some(t => t.endedAt === undefined)) void reconcile($).then(() => runNow?.()) // a subagent's turn too
     return next(e)
   })
 

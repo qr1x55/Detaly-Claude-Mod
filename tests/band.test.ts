@@ -60,9 +60,12 @@ function world(
   on('session.root', () => ({ value: 'D:\\dev\\game\\.claude\\worktrees\\brave-x' }))
   // the transcript's rows, and the conversation in API form: what a test adds (`transcript`)
   const transcript: unknown[] = []
+  const agentTalks: Record<string, unknown[]> = {} // a subagent's conversation; one not here is gone
   on('session.messages', ($, e) => ({
     value: (e as { as?: string }).as === 'api'
-      ? transcript
+      ? (e as { agentId?: string }).agentId
+        ? (agentTalks[(e as { agentId: string }).agentId] ?? { deny: 'no such agent' })
+        : transcript
       : [
           { role: 'user', text: 'You are operating in a git worktree.', toolUses: [] }, // the engine's own row
           { role: 'user', text: '<system-reminder>notes</system-reminder>train the walking net', toolUses: [] },
@@ -87,7 +90,7 @@ function world(
     written[e.path] = e.text
     return { value: undefined }
   })
-  return { clock, env, written, stored, transcript }
+  return { clock, env, written, stored, transcript, agentTalks }
 }
 
 // A background task's notification, as the engine submits it
@@ -534,6 +537,30 @@ test('an end glued into a turn is read after it; a shell followed blind that the
   await $.turn.complete({ turnId: 't1', answer: '', durationMs: 1, isAborted: false } as never)
   await clock.advance(2000)
   expect((await ui.find({ key: 'bg-g1' }))?.text).toContain('done in 0:30')
+})
+
+test("a subagent's shell ends by its conversation; one whose agent is gone ends too", async ($, on) => {
+  const { clock, agentTalks } = world(on, () => ({}))
+  let n = 0
+  on('tool.call', () => {
+    n += 1
+    return { result: {} as never, text: `Command running in background with ID: s${n}. Output is being written to: C:\\T\\tasks\\s${n}.output` }
+  })
+  on('turn.complete', () => ({ text: '' }) as never)
+  await $.session.start({ cwd: 'C:/', surface: 'desktop', isInteractive: true })
+  agentTalks.ag1 = [...launchRow('s1', 'Run the probe')]
+  agentTalks.ag2 = [...launchRow('s2', 'Run the other probe')]
+  await $.tool.call({ tool: 'Bash', command: 'p', description: 'Run the probe', run_in_background: true, agentId: 'ag1' } as never)
+  await $.tool.call({ tool: 'Bash', command: 'q', description: 'Run the other probe', run_in_background: true, agentId: 'ag2' } as never)
+  await clock.advance(30_000)
+  const ui = await $.ui.mount({ ...BAND, surface: 'desktop' })
+  // the end comes to ag1's conversation; ag2 is gone
+  agentTalks.ag1.push(gluedNote('s1'))
+  delete agentTalks.ag2
+  await $.turn.complete({ turnId: 't1', answer: '', durationMs: 1, isAborted: false, agentId: 'ag1' } as never)
+  await clock.advance(2000)
+  expect((await ui.find({ key: 'bg-s1' }))?.text).toContain('done in 0:30')
+  expect((await ui.find({ key: 'bg-s2' }))?.text).toContain('ended after')
 })
 
 test("the chats' tabs shrink their names to share the row between All and ⓘ Info", async ($, on) => {

@@ -17,6 +17,7 @@ export type JobProgressTask = {
   status?: string
   isCounted?: boolean
   spent?: Spent
+  agentId?: string // the subagent whose call launched it (its end comes to that agent's conversation)
 }
 
 declare module 'claude-code' {
