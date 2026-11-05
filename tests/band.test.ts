@@ -228,6 +228,9 @@ test("a notification's status ends every task it names, the engine's note after 
   const orphans = '<task-notification>\n<task-id>b1</task-id>\n<task-id>b2</task-id>\n<task-id>__orphan_summary__:shell</task-id>\n<status>stopped</status>\n<summary>3 background shell command tasks did not finish</summary></task-notification>'
   expect(endsIn(orphans)).toEqual([['b1', 'stopped'], ['b2', 'stopped'], ['__orphan_summary__:shell', 'stopped']])
   expect(endsIn(`${orphans} <task-notification><task-id>c1</task-id><status>failed</status></task-notification>`).at(-1)).toEqual(['c1', 'failed'])
+  // a Monitor's event has no status: the next notification's is not its
+  const monitor = '<task-notification><task-id>bc5</task-id><summary>Monitor event</summary><event>stepf2a done</event></task-notification>'
+  expect(endsIn(`${monitor}\n<task-notification><task-id>bgh</task-id><output-file>x</output-file><status>completed</status></task-notification>`)).toEqual([['bgh', 'completed']])
 })
 
 test('the end time names a later day', () => {

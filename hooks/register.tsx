@@ -156,7 +156,9 @@ function trackOf(now: number, description: string, more: Partial<Bg>): Bg {
 // A background task's end as its notification says it: <task-id>, then <status>.
 // One notification may name many tasks under one status: the engine's note after a restart lists every shell the
 // previous run left unfinished ("<task-id>a</task-id><task-id>b</task-id>…<status>stopped</status>").
-const NOTE = /((?:<task-id>[^<]+<\/task-id>\s*)+)[\s\S]*?<status>([^<]+)<\/status>/g
+// The status must be the same notification's: the gap to it crosses no other <task-id> nor a notification's end (a
+// Monitor's event has none, and its id took the next notification's status).
+const NOTE = /((?:<task-id>[^<]+<\/task-id>\s*)+)(?:(?!<task-id>|<\/task-notification>)[\s\S])*?<status>([^<]+)<\/status>/g
 export const endsIn = (text: string) =>
   [...text.matchAll(NOTE)].flatMap(([, ids = '', status = '']) => [...ids.matchAll(/<task-id>([^<]+)<\/task-id>/g)].map(([, id = '']) => [id, status] as const))
 
